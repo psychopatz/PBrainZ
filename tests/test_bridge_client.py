@@ -8,6 +8,8 @@ from hoomans_llm.bridge import BridgeRuntimeMonitor
 from hoomans_llm.bridge_client import (
     BridgeRequest,
     FileBridgeTransport,
+    _complete_and_deliver,
+    _semantic_tool_calls,
     run_bridge_pump,
 )
 from hoomans_llm.config import Settings
@@ -82,6 +84,139 @@ def test_file_transport_does_not_overwrite_busy_slots(tmp_path) -> None:
     finally:
         for slot in slots:
             transport.release(slot)
+
+
+def test_file_transport_recovers_only_slots_from_previous_runtime(tmp_path) -> None:
+    transport = FileBridgeTransport(tmp_path)
+    stale = BridgeRequest.create(
+        "projecthoomans.llm", "pollChat", {}, "old-runtime"
+    )
+    current = BridgeRequest.create(
+        "projecthoomans.llm", "pollChat", {}, "current-runtime"
+    )
+    stale_slot = transport.write_request(stale)
+    current_slot = transport.write_request(current)
+    stale_response = {
+        "message_type": "response",
+        "protocol_version": 1,
+        "request_id": stale.request_id,
+        "runtime_id": "old-runtime",
+        "status": "ok",
+        "result": {},
+    }
+    response_path = tmp_path / "responses" / f"slot-{stale_slot:02d}.json"
+    response_path.write_text(json.dumps(stale_response), encoding="utf-8")
+
+    assert transport.recover_stale_slots("current-runtime") == 1
+    assert not (tmp_path / "requests" / f"slot-{stale_slot:02d}.json").exists()
+    assert (tmp_path / "requests" / f"slot-{current_slot:02d}.json").exists()
+    transport.release(current_slot)
+
+
+def test_semantic_tool_calls_are_limited_to_tools_exposed_by_the_game() -> None:
+    request = {
+        "conversation_context": {
+            "available_tools": [
+                {"type": "function", "function": {"name": "order_follow"}},
+            ]
+        }
+    }
+    calls = [
+        {
+            "id": "call-1",
+            "function": {
+                "name": "order_follow",
+                "arguments": '{"command_id":"follow"}',
+            },
+        },
+        {
+            "id": "call-2",
+            "function": {"name": "order_unknown", "arguments": "{}"},
+        },
+    ]
+
+    assert _semantic_tool_calls(calls, request) == [
+        {
+            "id": "call-1",
+            "name": "order_follow",
+            "arguments": {"command_id": "follow"},
+        }
+    ]
+
+
+class StructuredProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def complete(self, _provider, request):
+        self.requests.append((_provider, request))
+        return CompletionResult(
+            request.model,
+            "",
+            finish_reason="tool_calls",
+            tool_calls=[
+                {
+                    "id": "call-follow",
+                    "function": {
+                        "name": "order_follow",
+                        "arguments": '{"command_id":"follow"}',
+                    },
+                }
+            ],
+        )
+
+
+class DeliveryClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def call(self, namespace, command, arguments, runtime_id):
+        self.calls.append((namespace, command, arguments, runtime_id))
+        return {"accepted": True}
+
+
+@pytest.mark.asyncio
+async def test_structured_bridge_delivers_authorized_semantic_tool_calls(tmp_path) -> None:
+    from hoomans_llm.bridge import BridgeState
+    from hoomans_llm.conversation_service import ConversationService
+
+    providers = StructuredProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="custom",
+        custom_base_url="http://127.0.0.1:1/v1",
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-structured-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "Follow me.",
+            "available_tools": [
+                {"type": "function", "function": {"name": "order_follow"}},
+            ],
+        },
+    }
+
+    await _complete_and_deliver(
+        providers,
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    assert client.calls[0][1] == "deliverChat"
+    assert client.calls[0][2]["semantic_tool_calls"][0]["name"] == "order_follow"
 
 
 class FakeProviders:

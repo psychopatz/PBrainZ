@@ -49,6 +49,7 @@ class ChatCompletionRequest(BaseModel):
 class CompletionMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class CompletionChoice(BaseModel):
@@ -149,7 +150,7 @@ class UISettingsRequest(BaseModel):
 
 
 class UIBridgeRequest(BaseModel):
-    """Toggle the HoomansLLM worker that polls the game bridge."""
+    """Toggle the game bridge setting and the HoomansLLM worker together."""
 
     enabled: bool
 
@@ -158,6 +159,7 @@ class UIProviderStatus(BaseModel):
     name: str
     configured: bool
     base_url: str | None = None
+    api_key: str | None = None
     api_key_hint: str | None = None
     models: list[str]
     model_source: str
@@ -180,6 +182,7 @@ class UIStatus(BaseModel):
     providers: list[UIProviderStatus]
     openai_base_url: str
     bridge: BridgeStatus
+    game_bridge_setting_enabled: bool
     bridge_worker_enabled: bool
     bridge_worker_running: bool
 

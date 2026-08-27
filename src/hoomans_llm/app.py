@@ -13,6 +13,7 @@ from hoomans_llm.bridge_controller import BridgeController
 from hoomans_llm.config import Settings, get_settings
 from hoomans_llm.database import SettingsDatabase
 from hoomans_llm.exceptions import ProviderError
+from hoomans_llm.game_bridge_settings import GameBridgeSettings
 from hoomans_llm.logging_setup import configure_logging
 from hoomans_llm.model_catalog import ModelCatalogManager
 from hoomans_llm.providers.registry import ProviderRegistry
@@ -47,10 +48,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             )
         bridge = BridgeRuntimeMonitor(app_settings.bridge_root)
+        game_bridge_settings = GameBridgeSettings(app_settings.bridge_config_path)
         app.state.settings = app_settings
         app.state.database = database
         app.state.providers = providers
         app.state.bridge = bridge
+        app.state.game_bridge_settings = game_bridge_settings
         catalog = ModelCatalogManager(app_settings, providers, database)
         app.state.model_catalog = catalog
         # Model catalogs are loaded from SQLite synchronously by the status

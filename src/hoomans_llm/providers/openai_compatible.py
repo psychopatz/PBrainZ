@@ -66,6 +66,7 @@ class OpenAICompatibleProvider(LLMProvider):
             text=(message.content if message and message.content else ""),
             finish_reason=self._finish_reason(choice.finish_reason if choice else None),
             usage=self._usage(getattr(response, "usage", None)),
+            tool_calls=self._tool_calls(message),
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -164,6 +165,31 @@ class OpenAICompatibleProvider(LLMProvider):
             completion_tokens=getattr(usage, "completion_tokens", None),
             total_tokens=getattr(usage, "total_tokens", None),
         )
+
+    @staticmethod
+    def _tool_calls(message: Any) -> list[dict[str, Any]] | None:
+        """Normalize SDK tool-call objects without coupling the rest of the app to OpenAI."""
+        calls = getattr(message, "tool_calls", None) if message is not None else None
+        if not calls:
+            return None
+        normalized: list[dict[str, Any]] = []
+        for call in calls[:16]:
+            function = getattr(call, "function", None)
+            name = getattr(function, "name", None)
+            arguments = getattr(function, "arguments", None)
+            if not name:
+                continue
+            normalized.append(
+                {
+                    "id": str(getattr(call, "id", "")),
+                    "type": str(getattr(call, "type", "function") or "function"),
+                    "function": {
+                        "name": str(name),
+                        "arguments": str(arguments or "{}"),
+                    },
+                }
+            )
+        return normalized or None
 
     @staticmethod
     def _finish_reason(reason: Any) -> str:

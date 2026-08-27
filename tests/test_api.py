@@ -55,6 +55,7 @@ def _client(
             gemini_api_key="test",
             bridge_required=bridge_required,
             bridge_root=str(bridge_path),
+            bridge_config_path=str(bridge_path / "PsychopatzCore_Bridge.txt"),
             database_path=str(bridge_path / "hoomansllm.db"),
             auto_refresh_models=False,
         )
@@ -83,6 +84,7 @@ def test_control_panel_api_reports_bridge_state(tmp_path) -> None:
 
     assert status.status_code == 200
     assert status.json()["bridge_worker_enabled"] is False
+    assert status.json()["game_bridge_setting_enabled"] is False
     assert status.json()["bridge"]["ready"] is False
     assert status.json()["providers"][1]["name"] == "gemini"
 
@@ -232,12 +234,17 @@ def test_control_panel_can_toggle_bridge_worker(monkeypatch, tmp_path) -> None:
 
     assert enabled.status_code == 200
     assert enabled.json()["bridge_worker_enabled"] is True
+    assert enabled.json()["game_bridge_setting_enabled"] is True
     assert disabled.status_code == 200
     assert disabled.json()["bridge_worker_enabled"] is False
+    assert disabled.json()["game_bridge_setting_enabled"] is False
     database = sqlite3.connect(tmp_path / "bridge" / "hoomansllm.db")
     saved = dict(database.execute("SELECT key, value FROM settings").fetchall())
     database.close()
     assert json.loads(saved["bridge_required"]) is False
+    assert (tmp_path / "bridge" / "PsychopatzCore_Bridge.txt").read_text(
+        encoding="utf-8"
+    ).splitlines()[1] == "bridge_enabled=false"
 
 
 def test_control_panel_persists_api_key_without_logging_the_secret(monkeypatch, tmp_path) -> None:
@@ -254,7 +261,11 @@ def test_control_panel_persists_api_key_without_logging_the_secret(monkeypatch, 
         logs = client.get("/api/logs")
 
     assert response.status_code == 200
-    assert response.json()["providers"][1]["api_key_hint"] == "••••-key"
+    gemini_status = next(
+        item for item in response.json()["providers"] if item["name"] == "gemini"
+    )
+    assert gemini_status["api_key"] == "new-secret-key"
+    assert gemini_status["api_key_hint"] == "••••-key"
     assert "new-secret-key" not in logs.text
     database = sqlite3.connect(tmp_path / "bridge" / "hoomansllm.db")
     saved = dict(database.execute("SELECT key, value FROM settings").fetchall())
@@ -317,6 +328,7 @@ def test_control_panel_exposes_and_persists_separate_local_profiles(tmp_path) ->
         item for item in response.json()["providers"] if item["name"] == "ollama"
     )
     assert ollama_status["base_url"] == "http://localhost:11434/v1"
+    assert ollama_status["api_key"] == "ollama-local-key"
     assert ollama_status["api_key_hint"] == "••••-key"
     custom_status = next(
         item for item in response.json()["providers"] if item["name"] == "custom"

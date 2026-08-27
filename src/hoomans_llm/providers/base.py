@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 from hoomans_llm.api.models import ChatCompletionRequest
 
@@ -36,6 +37,7 @@ class CompletionResult:
     text: str
     finish_reason: str = "stop"
     usage: TokenUsage | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)

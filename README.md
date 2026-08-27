@@ -56,10 +56,11 @@ When started by either launcher, a lightweight native Python `tkinter` control
 panel opens automatically. It shows whether the Project Hoomans bridge is
 detected and ready, whether the local HoomansLLM bridge worker is running, and
 whether each provider is configured. It also allows the default provider,
-model, timeout, polling interval, and local bridge worker to be changed. These
-settings and API keys are saved in the local SQLite database; keys are never
-displayed in full or written to the activity log. Set `OPEN_GUI=false` to run
-the API without the panel.
+model, timeout, polling interval, and Project Hoomans bridge setting to be
+changed. These settings and API keys are saved in the local SQLite database;
+the native panel displays provider keys in plain text, but keys are never
+written to the activity log. Set `OPEN_GUI=false` to run the API without the
+panel.
 
 The panel's Chat test tab and Test API button send direct provider requests
 through `/api/chat`, so providers can be checked before Project Hoomans is
@@ -131,11 +132,26 @@ important controls are:
 - separate Custom endpoint/API key (the endpoint is required; the key is
   optional);
 - Gemini API key;
-- request timeout, bridge polling, and bridge worker state.
+- request timeout, bridge polling, and Project Hoomans bridge state.
 - light or dark control-panel theme.
 
 The optional `HOOMANSLLM_DB` process environment variable changes the SQLite
 database path. `OPEN_GUI=false` runs the API without opening the native panel.
+
+For bridge debugging, print the persisted recent activity without starting the
+server:
+
+```bash
+./scripts/run.sh --activity
+./scripts/run.sh --activity 100
+./scripts/run.sh --activity-json
+```
+
+`--activity` shows the newest 50 entries by default and accepts up to 500.
+The same flags work with the frozen Windows executable or AppImage. Release
+builds keep a terminal attached so bridge state, NPC task messages, provider
+responses, and delivery errors are also visible while the GUI/server runs.
+Message previews are bounded and API keys are never logged.
 
 The OpenAI, Ollama, LM Studio, and Custom profiles use the OpenAI Chat
 Completions protocol. Ollama and LM Studio normally need no API key. The Custom
@@ -158,9 +174,10 @@ Project Hoomans' narrow NPC-chat capability, calls the configured provider, and
 delivers the reply back through the game tunnel. Set `BRIDGE_REQUIRED=false`
 only for standalone provider testing.
 
-The control-panel bridge switch controls HoomansLLM's polling worker. The
-Project Hoomans in-game bridge setting remains the authority and must also be
-enabled in the game.
+The control-panel bridge switch updates the same
+`~/Zomboid/Lua/PsychopatzCore_Bridge.txt` setting used by the game and controls
+HoomansLLM's polling worker together. Project Hoomans applies that setting
+while the game is running, so the profiler is not required for this workflow.
 
 Keep the default localhost bind unless you have separately secured the
 service. This initial server does not provide authentication.
@@ -221,6 +238,44 @@ The game-side capability is intentionally limited to `pollChat` and
 `deliverChat` in the `projecthoomans.llm` namespace. Requests are tied to the
 current runtime ID and the active NPC conversation. Provider keys remain in
 HoomansLLM's local SQLite database and never enter the game tunnel.
+
+The structured game request also carries a compact canonical character card,
+relationship snapshot, notable current state, recent dialogue, and the
+semantic tools exposed for that NPC. HoomansLLM owns prompt assembly and
+conversation memory; Project Hoomans remains authoritative for gameplay. Any
+returned order intent is sent back as an untrusted semantic tool call and is
+validated by the game's existing command registry before it can be submitted.
+
+## NPC memory and context
+
+NPC memory is separate from the settings database. HoomansLLM creates one
+SQLite database per save/world under the configured `memory_root` (by default,
+the `memory/` directory beside the settings database). The filename contains a
+short hash of the stable Project Zomboid save identifier, while the full
+identifier is stored in the database metadata. Memory rows are scoped by the
+exact `(world_uuid, player_uuid, npc_uuid)` tuple, so NPCs, players, and saves
+cannot bleed into one another.
+
+The store has a single shared `memories` table rather than NPC-specific tables,
+conversation sessions/turns, commitments, provenance, and indexes. It uses
+SQLite FTS5 when available and falls back to bounded token matching when it is
+not. Retrieval is deliberately small and deterministic: recent turns are
+bounded, active commitments are always considered, and relevant memories are
+ranked before prompt assembly. Embeddings and vector extensions are not
+required by this foundation.
+
+Memory writes are failure-contained: a database problem is logged and the
+provider request continues without memory. Consolidation runs at the configured
+turn threshold or when a session ends. The default consolidator is a small
+deterministic extractor for identity, preferences, commitments, and a bounded
+conversation summary; it is an explicit replaceable hook for a future extractor
+provider.
+
+Detailed retrieval and context diagnostics are disabled by default. Set
+`LLM_DIAGNOSTICS=true` only while troubleshooting; API keys are never included.
+
+See [`docs/architecture.md`](docs/architecture.md) for the request flow,
+schema, multiplayer boundary, failure model, and extension points.
 
 ## Adding a provider
 

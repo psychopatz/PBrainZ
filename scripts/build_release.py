@@ -114,7 +114,10 @@ def _build_pyinstaller(target: str, staging: Path) -> Path:
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--windowed",
+        # Keep stdout/stderr available so ``HoomansLLM --activity`` and the
+        # bridge send/receive diagnostics work from a terminal in a frozen
+        # release build. The GUI still launches normally from the desktop.
+        "--console",
         "--name",
         "HoomansLLM",
         "--paths",

@@ -40,11 +40,18 @@ class Settings(BaseSettings):
     max_retries: int = Field(default=2, ge=0, le=10)
     bridge_required: bool = True
     bridge_root: str | None = None
+    bridge_config_path: str | None = None
     bridge_poll_interval: float = Field(default=0.5, gt=0.05, le=10)
     open_gui: bool = True
     auto_refresh_models: bool = False
     model_refresh_interval: float = Field(default=21600.0, gt=60, le=604800)
     ui_theme: str = "light"
+    memory_root: str | None = None
+    context_max_chars: int = Field(default=12000, ge=2000, le=100000)
+    memory_recent_turns: int = Field(default=8, ge=1, le=32)
+    memory_retrieval_limit: int = Field(default=6, ge=1, le=16)
+    memory_consolidation_turns: int = Field(default=12, ge=2, le=100)
+    llm_diagnostics: bool = False
 
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"

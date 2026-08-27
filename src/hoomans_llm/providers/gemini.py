@@ -1,5 +1,7 @@
 """Google Gemini provider adapter using the official ``google-genai`` SDK."""
 
+import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -13,11 +15,14 @@ from hoomans_llm.exceptions import (
 
 from .base import CompletionResult, LLMProvider, StreamEvent, TokenUsage
 
+LOGGER = logging.getLogger(__name__)
+
 
 class GeminiProvider(LLMProvider):
     """Translate the common chat contract to Gemini's content-generation API."""
 
     name = "gemini"
+    _SCHEMA_TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array"})
 
     def __init__(self, settings: Settings) -> None:
         if not settings.gemini_api_key:
@@ -52,6 +57,7 @@ class GeminiProvider(LLMProvider):
             text=getattr(response, "text", None) or "",
             finish_reason=self._finish_reason(response),
             usage=self._usage(getattr(response, "usage_metadata", None)),
+            tool_calls=self._tool_calls(response),
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -129,8 +135,116 @@ class GeminiProvider(LLMProvider):
         max_output_tokens = request.max_completion_tokens or request.max_tokens
         if max_output_tokens is not None:
             config_values["max_output_tokens"] = max_output_tokens
+        tools = cls._tools(request.tools, types)
+        if tools:
+            config_values["tools"] = tools
         config = types.GenerateContentConfig(**config_values) if config_values else None
         return contents, config
+
+    @classmethod
+    def _tools(cls, tool_definitions: list[dict[str, Any]] | None, types: Any) -> list[Any]:
+        """Translate the common function-tool shape to Gemini declarations."""
+        declarations: list[Any] = []
+        for index, tool in enumerate((tool_definitions or [])[:12]):
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if not isinstance(function, dict) or not function.get("name"):
+                continue
+            declaration_values: dict[str, Any] = {
+                "name": str(function["name"]),
+                "description": str(function.get("description") or ""),
+            }
+            parameters = function.get("parameters")
+            if isinstance(parameters, dict):
+                declaration_values["parametersJsonSchema"] = cls._sanitize_schema(
+                    parameters,
+                    path=f"$.tools[{index}].function.parameters",
+                )
+            declarations.append(types.FunctionDeclaration(**declaration_values))
+        return [types.Tool(functionDeclarations=declarations)] if declarations else []
+
+    @classmethod
+    def _sanitize_schema(cls, schema: dict[str, Any], *, path: str = "$") -> dict[str, Any]:
+        """Convert the shared JSON-schema subset to Gemini's supported schema shape.
+
+        Project Hoomans and OpenAI-compatible providers share tool definitions, but
+        Gemini accepts only a smaller schema vocabulary.  In particular, custom
+        schema metadata or an invalid ``type`` must not be sent to Gemini.  Keep
+        this conversion provider-local so the common contract remains intact for
+        OpenAI-compatible endpoints.
+        """
+        raw_type = schema.get("type")
+        nullable = schema.get("nullable") is True
+        schema_type: str | None = None
+
+        if isinstance(raw_type, (list, tuple)):
+            raw_types = [str(value).lower() for value in raw_type]
+            nullable = nullable or "null" in raw_types
+            schema_type = next(
+                (value for value in raw_types if value in cls._SCHEMA_TYPES),
+                None,
+            )
+        elif raw_type is not None:
+            candidate = str(raw_type).lower()
+            if candidate in cls._SCHEMA_TYPES:
+                schema_type = candidate
+
+        if schema_type is None:
+            if raw_type is not None:
+                LOGGER.warning(
+                    "Normalizing unsupported Gemini tool schema type path=%s type=%r",
+                    path,
+                    raw_type,
+                )
+            if isinstance(schema.get("properties"), dict):
+                schema_type = "object"
+            elif isinstance(schema.get("items"), dict):
+                schema_type = "array"
+            else:
+                # Tool arguments without a recognizable type are most commonly
+                # scalar text values (for example, social_react.kind).
+                schema_type = "string"
+
+        output: dict[str, Any] = {"type": schema_type}
+        if nullable:
+            output["nullable"] = True
+
+        description = schema.get("description")
+        if isinstance(description, str) and description:
+            output["description"] = description
+        enum = schema.get("enum")
+        if isinstance(enum, (list, tuple)):
+            output["enum"] = list(enum)
+
+        if schema_type == "object":
+            properties = schema.get("properties")
+            safe_properties: dict[str, Any] = {}
+            if isinstance(properties, dict):
+                for name, child in properties.items():
+                    if isinstance(child, dict):
+                        safe_name = str(name)
+                        safe_properties[safe_name] = cls._sanitize_schema(
+                            child,
+                            path=f"{path}.properties.{safe_name}",
+                        )
+            if safe_properties:
+                output["properties"] = safe_properties
+
+            required = schema.get("required")
+            if isinstance(required, (list, tuple)):
+                safe_required = [
+                    str(name) for name in required if str(name) in safe_properties
+                ]
+                if safe_required:
+                    output["required"] = safe_required
+        elif schema_type == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                output["items"] = cls._sanitize_schema(items, path=f"{path}.items")
+
+        # Deliberately omit additionalProperties and all unknown/custom keywords.
+        # They are not needed for the NPC command contract and can be rejected by
+        # Gemini even when they are accepted by the OpenAI-compatible API shape.
+        return output
 
     @staticmethod
     def _text_content(message: ChatMessage) -> str:
@@ -146,6 +260,29 @@ class GeminiProvider(LLMProvider):
                 )
             parts.append(part["text"])
         return "".join(parts)
+
+    @staticmethod
+    def _tool_calls(response: Any) -> list[dict[str, Any]] | None:
+        calls: list[dict[str, Any]] = []
+        for candidate in getattr(response, "candidates", None) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                function = getattr(part, "function_call", None)
+                name = getattr(function, "name", None) if function else None
+                if not name:
+                    continue
+                arguments = getattr(function, "args", None) or {}
+                calls.append(
+                    {
+                        "id": str(getattr(function, "id", "") or ""),
+                        "type": "function",
+                        "function": {
+                            "name": str(name),
+                            "arguments": json.dumps(arguments, ensure_ascii=True),
+                        },
+                    }
+                )
+        return calls or None
 
     @staticmethod
     def _usage(usage: Any) -> TokenUsage | None:
@@ -178,4 +315,8 @@ class GeminiProvider(LLMProvider):
             return ProviderError(
                 "Gemini rate-limited the request.", status_code=429, code="provider_rate_limited"
             )
-        return ProviderError(f"Gemini provider request failed: {type(exc).__name__}.")
+        detail = " ".join(str(exc).split())[:600]
+        message = f"Gemini provider request failed: {type(exc).__name__}"
+        if detail:
+            message += f" — {detail}"
+        return ProviderError(message + ".")

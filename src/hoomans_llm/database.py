@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_DATABASE_NAME = "hoomansllm.db"
+DEFAULT_ACTIVITY_LIMIT = 50
+MAX_ACTIVITY_LIMIT = 500
 PERSISTED_SETTINGS = (
     "app_name",
     "host",
@@ -43,6 +45,12 @@ PERSISTED_SETTINGS = (
     "auto_refresh_models",
     "model_refresh_interval",
     "ui_theme",
+    "memory_root",
+    "context_max_chars",
+    "memory_recent_turns",
+    "memory_retrieval_limit",
+    "memory_consolidation_turns",
+    "llm_diagnostics",
 )
 
 
@@ -191,8 +199,8 @@ class SettingsDatabase:
         finally:
             connection.close()
 
-    def recent_logs(self, limit: int = 100) -> list[dict[str, str]]:
-        bounded_limit = max(1, min(limit, 500))
+    def recent_logs(self, limit: int = DEFAULT_ACTIVITY_LIMIT) -> list[dict[str, str]]:
+        bounded_limit = max(1, min(limit, MAX_ACTIVITY_LIMIT))
         connection = self._connect()
         try:
             rows = connection.execute(
