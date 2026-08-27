@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hoomans-llm"
+version = "0.1.0"
+description = "A provider-agnostic local LLM gateway for Project Hoomans NPCs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "google-genai>=1.0,<2.0",
+    "openai>=1.68,<3.0",
+    "pydantic-settings>=2.7,<3.0",
+    "uvicorn[standard]>=0.34,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28,<1.0",
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.25,<1.0",
+    "ruff>=0.9,<1.0",
+]
+build = [
+    "pyinstaller>=6.0,<7.0",
+]
+
+[project.scripts]
+hoomans-llm = "hoomans_llm.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hoomans_llm"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

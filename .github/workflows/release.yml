@@ -1,0 +1,59 @@
+name: Build HoomansLLM release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip; python -m pip install ".[build]"
+      - name: Build Windows executable
+        run: python scripts/build_release.py --target exe --version "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HoomansLLM-windows
+          path: dist/release/*.exe
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tk runtime development files
+        run: sudo apt-get update && sudo apt-get install --yes python3-tk
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip && python -m pip install ".[build]"
+      - name: Build Linux AppImage
+        run: python scripts/build_release.py --target appimage --version "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HoomansLLM-linux
+          path: dist/release/*.AppImage
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.AppImage

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+hoomansllm.db
+hoomansllm.db-*
+dist/
+build/
+.architecture-refactor/
+*.egg-info/
+.codebase-memory
