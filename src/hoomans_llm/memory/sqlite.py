@@ -465,6 +465,36 @@ class SQLiteMemoryStore:
             connection.commit()
         return saved
 
+    def remember_hearsay(
+        self,
+        scope: MemoryScope,
+        content: str,
+        *,
+        source_npc_uuid: str,
+        subject_npc_uuid: str | None = None,
+        session_id: str | None = None,
+        importance: float = 0.45,
+    ) -> MemoryRecord:
+        """Store a claim as hearsay, never as authoritative world fact."""
+
+        return self.remember(
+            MemoryRecord(
+                memory_id=uuid.uuid4().hex,
+                scope=scope,
+                memory_type=MemoryType.HEARSAY,
+                content=content,
+                tags=("hearsay", "claim"),
+                importance=importance,
+                provenance={
+                    "source": "npc_claim",
+                    "source_npc_uuid": str(source_npc_uuid),
+                    "subject_npc_uuid": str(subject_npc_uuid or ""),
+                    "session_id": session_id,
+                },
+                session_id=session_id,
+            )
+        )
+
     def retrieve(
         self,
         scope: MemoryScope,

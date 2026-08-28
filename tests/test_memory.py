@@ -76,3 +76,21 @@ def test_context_builder_omits_normal_optional_sections_and_enforces_budget() ->
     assert "Core NPC Rules" in (result.messages[0].content or "")
     assert "Relationship Snapshot" not in (result.messages[0].content or "")
     assert result.messages[-1].content == "Where is the shelter?"
+
+
+def test_hearsay_memory_keeps_claim_provenance_without_making_a_fact(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    scope = MemoryScope("world-one", "player-one", "npc-bob")
+
+    memory = store.remember_hearsay(
+        scope,
+        "Alice claimed Sarah stole medicine.",
+        source_npc_uuid="npc-alice",
+        subject_npc_uuid="npc-sarah",
+        session_id="gossip-one",
+    )
+
+    assert memory.memory_type is MemoryType.HEARSAY
+    assert memory.provenance["source_npc_uuid"] == "npc-alice"
+    assert memory.provenance["subject_npc_uuid"] == "npc-sarah"
+    assert store.retrieve(scope, "medicine")[0].memory.memory_type is MemoryType.HEARSAY

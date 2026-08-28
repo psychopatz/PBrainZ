@@ -1,8 +1,4 @@
-"""Read-only access to the PsychopatzCore bridge runtime state.
-
-The game-side bridge remains the authority. This module only validates the
-runtime marker and JSON state; it never writes requests or dispatches commands.
-"""
+"""Read-only access to the PsychopatzCore bridge runtime state."""
 
 from __future__ import annotations
 
@@ -12,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 1
+from .protocol import PROTOCOL_VERSION
+
 MAX_RUNTIME_BYTES = 64 * 1024
 
 
@@ -95,3 +92,4 @@ class BridgeRuntimeMonitor:
             transport=str(value.get("transport") or "") or None,
             message="bridge ready" if ready else f"bridge lifecycle is {lifecycle or 'unknown'}",
         )
+

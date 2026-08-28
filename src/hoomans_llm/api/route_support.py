@@ -71,6 +71,14 @@ def _ui_status(request: Request) -> UIStatus:
         game_bridge_setting_enabled=game_bridge_setting_enabled,
         bridge_worker_enabled=bool(controller_status["worker_enabled"]),
         bridge_worker_running=bool(controller_status["worker_running"]),
+        tts_synthesis_workers=settings.tts_synthesis_workers,
+        tts_model_cache_size=settings.tts_model_cache_size,
+        tts_max_simultaneous_playback=settings.tts_max_simultaneous_playback,
+        tts_max_generated_ahead=settings.tts_max_generated_ahead,
+        tts_max_tts_ready_ahead=settings.tts_max_tts_ready_ahead,
+        tts_natural_gap_ms=settings.tts_natural_gap_ms,
+        tts_synthesis_timeout=settings.tts_synthesis_timeout,
+        tts_audio_buffer_ms=settings.tts_audio_buffer_ms,
     )
 
 

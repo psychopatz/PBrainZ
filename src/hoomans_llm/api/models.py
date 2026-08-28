@@ -147,6 +147,14 @@ class UISettingsRequest(BaseModel):
     clear_lmstudio_api_key: bool = False
     clear_custom_api_key: bool = False
     clear_gemini_api_key: bool = False
+    tts_synthesis_workers: int | None = Field(default=None, ge=1, le=4)
+    tts_model_cache_size: int | None = Field(default=None, ge=1, le=16)
+    tts_max_simultaneous_playback: int | None = Field(default=None, ge=1, le=8)
+    tts_max_generated_ahead: int | None = Field(default=None, ge=1, le=16)
+    tts_max_tts_ready_ahead: int | None = Field(default=None, ge=1, le=8)
+    tts_natural_gap_ms: int | None = Field(default=None, ge=0, le=2000)
+    tts_synthesis_timeout: float | None = Field(default=None, gt=0, le=300)
+    tts_audio_buffer_ms: int | None = Field(default=None, ge=0, le=2000)
 
 
 class UIBridgeRequest(BaseModel):
@@ -185,6 +193,58 @@ class UIStatus(BaseModel):
     game_bridge_setting_enabled: bool
     bridge_worker_enabled: bool
     bridge_worker_running: bool
+    tts_synthesis_workers: int = 1
+    tts_model_cache_size: int = 2
+    tts_max_simultaneous_playback: int = 4
+    tts_max_generated_ahead: int = 3
+    tts_max_tts_ready_ahead: int = 1
+    tts_natural_gap_ms: int = 180
+    tts_synthesis_timeout: float = 45.0
+    tts_audio_buffer_ms: int = 50
+
+
+class UITTSVoicePreset(BaseModel):
+    slot: str = Field(min_length=1, max_length=128)
+    voice_model_id: str = Field(min_length=1, max_length=256)
+    optional_speaker_id: int | None = None
+
+
+class UITTSSettingsRequest(BaseModel):
+    """Local TTS controls kept separate from the provider settings tab."""
+
+    enabled: bool | None = None
+    piper_executable: str | None = Field(default=None, min_length=1)
+    model_root: str | None = None
+    metadata_path: str | None = None
+    voice_catalog_url: str | None = Field(default=None, min_length=1)
+    voice_catalog_ttl_seconds: int | None = Field(default=None, ge=60, le=2592000)
+    catalog_language: str | None = Field(default=None, min_length=1, max_length=64)
+    output_device: str | None = None
+    master_volume: float | None = Field(default=None, ge=0, le=1)
+    synthesis_workers: int | None = Field(default=None, ge=1, le=4)
+    model_cache_size: int | None = Field(default=None, ge=1, le=16)
+    max_simultaneous_playback: int | None = Field(default=None, ge=1, le=8)
+    max_generated_ahead: int | None = Field(default=None, ge=1, le=16)
+    max_tts_ready_ahead: int | None = Field(default=None, ge=1, le=8)
+    natural_gap_ms: int | None = Field(default=None, ge=0, le=2000)
+    synthesis_timeout: float | None = Field(default=None, gt=0, le=300)
+    audio_buffer_ms: int | None = Field(default=None, ge=0, le=2000)
+    voice_presets: list[UITTSVoicePreset] | None = None
+
+
+class UITTSVoiceInstallRequest(BaseModel):
+    voice_model_id: str = Field(min_length=1, max_length=256)
+
+
+class UITTSVoicePreviewRequest(BaseModel):
+    voice_model_id: str = Field(min_length=1, max_length=256)
+
+
+class UITTSTestRequest(BaseModel):
+    slot: str = Field(min_length=1, max_length=128)
+    text: str = Field(
+        default="This is a HoomansLLM Piper voice test.", min_length=1, max_length=1200
+    )
 
 
 class UIModelRefreshRequest(BaseModel):

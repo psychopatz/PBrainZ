@@ -4,15 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from hoomans_llm.bridge import BridgeRuntimeMonitor
-from hoomans_llm.bridge_client import (
-    BridgeRequest,
-    FileBridgeTransport,
-    _complete_and_deliver,
-    _semantic_tool_calls,
-    run_bridge_pump,
-)
+from hoomans_llm.bridge import BridgeRequest, BridgeRuntimeMonitor, BridgeState
+from hoomans_llm.bridge.handler import complete_and_deliver, semantic_tool_calls_for
+from hoomans_llm.bridge.pump import run_bridge_pump
+from hoomans_llm.bridge.transport import FileBridgeTransport
 from hoomans_llm.config import Settings
+from hoomans_llm.conversation_runtime import Utterance
 from hoomans_llm.providers.base import CompletionResult
 
 
@@ -135,7 +132,7 @@ def test_semantic_tool_calls_are_limited_to_tools_exposed_by_the_game() -> None:
         },
     ]
 
-    assert _semantic_tool_calls(calls, request) == [
+    assert semantic_tool_calls_for(calls, request) == [
         {
             "id": "call-1",
             "name": "order_follow",
@@ -207,7 +204,7 @@ async def test_structured_bridge_delivers_authorized_semantic_tool_calls(tmp_pat
         },
     }
 
-    await _complete_and_deliver(
+    await complete_and_deliver(
         providers,
         client,
         BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
@@ -225,6 +222,68 @@ class FakeProviders:
 
     async def complete(self, _provider: str, request) -> CompletionResult:
         return CompletionResult(model=request.model, text="Stay close to the shelter.")
+
+
+class FakeTTSService:
+    def __init__(self) -> None:
+        self.enabled = True
+        self.last_error = None
+        self.enqueued: list[Utterance] = []
+
+    def resolve_voice_binding(self, _conversation_id, _npc_uuid, binding):
+        return binding
+
+    def can_synthesize(self, binding) -> bool:
+        return binding is not None
+
+    async def enqueue(self, utterance, *, on_started=None, on_finished=None, on_failed=None):
+        self.enqueued.append(utterance)
+        if on_started:
+            await on_started(utterance)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_tts_bridge_sends_only_compact_start_event_and_keeps_text_payload() -> None:
+    client = DeliveryClient()
+    tts = FakeTTSService()
+    request = {
+        "request_id": "pnc-tts-1",
+        "npc_id": "npc-one",
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "Hello."}],
+        "context": {
+            "conversation_id": "conversation-one",
+            "voice_binding": {
+                "npc_uuid": "npc-one",
+                "slot": "VoiceFemale:2",
+                "pitch": 7,
+            },
+        },
+    }
+
+    await complete_and_deliver(
+        FakeProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        tts_service=tts,
+    )
+
+    delivery = client.calls[0][2]
+    speech_start = client.calls[1][2]
+    assert delivery["presentation_mode"] == "tts"
+    assert delivery["response_text"] == "Stay close to the shelter."
+    assert speech_start == {
+        "request_id": "pnc-tts-1",
+        "conversation_id": "conversation-one",
+        "utterance_id": "conversation-one:pnc-tts-1",
+        "npc_uuid": "npc-one",
+        "text": "Stay close to the shelter.",
+        "duration_ms": 0,
+    }
+    assert "audio" not in speech_start
+    assert "model_path" not in speech_start
 
 
 async def _fake_game(root: Path, delivered: asyncio.Event) -> None:

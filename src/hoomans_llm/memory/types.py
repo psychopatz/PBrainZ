@@ -9,6 +9,9 @@ from typing import Any, Protocol
 
 class MemoryType(StrEnum):
     FACT = "FACT"
+    OBSERVED_FACT = "OBSERVED_FACT"
+    CLAIM = "CLAIM"
+    HEARSAY = "HEARSAY"
     SOCIAL_EVENT = "SOCIAL_EVENT"
     COMMITMENT = "COMMITMENT"
     PERSONAL_EVENT = "PERSONAL_EVENT"

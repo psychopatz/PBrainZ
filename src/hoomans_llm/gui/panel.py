@@ -12,6 +12,7 @@ from .request import ApiRequestRunner, RequestFailure, RequestSuccess
 from .settings_tab import SettingsTab
 from .state import PanelState
 from .theme import apply_theme
+from .tts_tab import TTSTab
 
 
 class HoomansLLMControlPanel:
@@ -29,8 +30,9 @@ class HoomansLLMControlPanel:
         self._requests = ApiRequestRunner(self.root, host, port)
         self.base_url = self._requests.base_url
         self.control_tab: ControlTab
-        self.settings_tab: SettingsTab
         self.chat_tab: ChatTab
+        self.tts_tab: TTSTab
+        self.settings_tab: SettingsTab
         self._build_ui()
         self._apply_theme(self.state.theme.get())
         self.root.after(100, self.refresh)
@@ -42,9 +44,11 @@ class HoomansLLMControlPanel:
         control_frame = ttk.Frame(notebook)
         settings_frame = ttk.Frame(notebook)
         chat_frame = ttk.Frame(notebook)
+        tts_frame = ttk.Frame(notebook)
         notebook.add(control_frame, text="Control panel")
         notebook.add(settings_frame, text="Settings")
         notebook.add(chat_frame, text="Chat test")
+        notebook.add(tts_frame, text="TTS")
 
         self.control_tab = ControlTab(
             control_frame,
@@ -61,6 +65,7 @@ class HoomansLLMControlPanel:
             self._theme_changed,
         )
         self.chat_tab = ChatTab(chat_frame, self._run_request, self._provider_request_timeout)
+        self.tts_tab = TTSTab(tts_frame, self._run_request)
 
     def refresh(self) -> None:
         if self.state.closed or self.state.refresh_in_flight:
@@ -160,11 +165,12 @@ class HoomansLLMControlPanel:
             self.state.settings_dirty = False
         self.state.applying_status = True
         try:
+            if success_message == "Settings saved.":
+                self.settings_tab.mark_saved()
             self.control_tab.apply_status_values(data, preserve_unsaved)
+            self.settings_tab.apply_status(data, preserve_unsaved)
             if not preserve_unsaved:
-                self._set_if_changed(
-                    self.state.timeout, str(data.get("request_timeout", 120))
-                )
+                self._set_if_changed(self.state.timeout, str(data.get("request_timeout", 120)))
                 self._set_if_changed(
                     self.state.poll_interval, str(data.get("bridge_poll_interval", 0.5))
                 )
@@ -176,6 +182,7 @@ class HoomansLLMControlPanel:
         providers = self.state.provider_models
         preferred = data.get("default_provider") or next(iter(providers), "")
         self.chat_tab.set_providers(providers, preferred)
+        self.tts_tab.refresh()
         if success_message == "Settings saved.":
             self.state.settings_dirty = False
         self.root.after(2000, self.refresh)

@@ -8,8 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from hoomans_llm.api.routes import router
-from hoomans_llm.bridge import BridgeRuntimeMonitor
-from hoomans_llm.bridge_controller import BridgeController
+from hoomans_llm.bridge import BridgeController, BridgeRuntimeMonitor
 from hoomans_llm.config import Settings, get_settings
 from hoomans_llm.database import SettingsDatabase
 from hoomans_llm.exceptions import ProviderError
@@ -17,6 +16,7 @@ from hoomans_llm.game_bridge_settings import GameBridgeSettings
 from hoomans_llm.logging_setup import configure_logging
 from hoomans_llm.model_catalog import ModelCatalogManager
 from hoomans_llm.providers.registry import ProviderRegistry
+from hoomans_llm.tts import TTSService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,11 +56,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.game_bridge_settings = game_bridge_settings
         catalog = ModelCatalogManager(app_settings, providers, database)
         app.state.model_catalog = catalog
+        tts = TTSService(app_settings)
+        app.state.tts = tts
+        await tts.start()
         # Model catalogs are loaded from SQLite synchronously by the status
         # route. Network discovery is deliberately manual so startup never
         # waits on unavailable local providers.
         app.state.model_refresh_task = None
-        controller = BridgeController(app_settings, providers, bridge)
+        controller = BridgeController(app_settings, providers, bridge, tts)
         app.state.bridge_controller = controller
         app.state.bridge_pump = None
         if controller.enabled:
@@ -72,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await controller.stop()
             app.state.bridge_pump = None
+            await tts.stop()
             await providers.close()
             LOGGER.info("HoomansLLM stopped")
 

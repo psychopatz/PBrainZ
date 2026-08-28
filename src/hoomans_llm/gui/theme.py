@@ -97,6 +97,32 @@ def apply_theme(
         selectbackground=[("readonly", active_background)],
         selectforeground=[("readonly", "#ffffff")],
     )
+    style.configure(
+        "Treeview",
+        background=field_background,
+        fieldbackground=field_background,
+        foreground=foreground,
+        bordercolor=border,
+        lightcolor=border,
+        darkcolor=border,
+        rowheight=24,
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", active_background)],
+        foreground=[("selected", "#ffffff")],
+    )
+    style.configure(
+        "Treeview.Heading",
+        background=button_background,
+        foreground=foreground,
+        bordercolor=border,
+    )
+    style.map(
+        "Treeview.Heading",
+        background=[("active", active_background)],
+        foreground=[("active", "#ffffff")],
+    )
     root.option_add("*TCombobox*Listbox.background", field_background)
     root.option_add("*TCombobox*Listbox.foreground", foreground)
     root.option_add("*TCombobox*Listbox.selectBackground", active_background)

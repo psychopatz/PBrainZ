@@ -15,10 +15,15 @@ from hoomans_llm.api.models import (
     UIModelRefreshRequest,
     UISettingsRequest,
     UIStatus,
+    UITTSSettingsRequest,
+    UITTSTestRequest,
+    UITTSVoiceInstallRequest,
+    UITTSVoicePreviewRequest,
 )
 from hoomans_llm.config import OPENAI_COMPATIBLE_PROVIDERS
 from hoomans_llm.database import DEFAULT_ACTIVITY_LIMIT, SettingsDatabase
 from hoomans_llm.providers.registry import ProviderRegistry
+from hoomans_llm.tts import TTSException, TTSService
 
 from .response_format import _completion_response
 from .route_support import (
@@ -103,6 +108,23 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
         "ui_theme": body.ui_theme or settings.ui_theme,
     }
     values.update(credential_updates)
+    tts_fields = (
+        "tts_synthesis_workers",
+        "tts_model_cache_size",
+        "tts_max_simultaneous_playback",
+        "tts_max_generated_ahead",
+        "tts_max_tts_ready_ahead",
+        "tts_natural_gap_ms",
+        "tts_synthesis_timeout",
+        "tts_audio_buffer_ms",
+    )
+    tts_reconfigure_required = False
+    for field_name in tts_fields:
+        value = getattr(body, field_name)
+        if value is not None:
+            values[field_name] = value
+            setattr(settings, field_name, value)
+            tts_reconfigure_required = True
     try:
         database.save_settings(values)
     except (OSError, sqlite3.Error) as error:
@@ -119,6 +141,8 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
     for key, value in credential_updates.items():
         setattr(settings, key, value)
     await registry.invalidate(changed_providers)
+    if tts_reconfigure_required:
+        await request.app.state.tts.reconfigure()
     LOGGER.info(
         "settings updated provider=%s api_keys_changed=%s",
         provider_name,
@@ -162,6 +186,131 @@ async def ui_logs(
     request: Request, limit: int = DEFAULT_ACTIVITY_LIMIT
 ) -> UILogResponse:
     return UILogResponse(entries=request.app.state.database.recent_logs(limit))
+
+
+@router.get("/api/tts", tags=["tts"])
+async def tts_status(request: Request, refresh_catalog: bool = False) -> dict[str, object]:
+    """Return local Piper/catalog/playback diagnostics for the native panel."""
+
+    service: TTSService = request.app.state.tts
+    await service.refresh_catalog(force=refresh_catalog)
+    return {"status": "ok", **service.status()}
+
+
+@router.post("/api/tts/settings", tags=["tts"])
+async def update_tts_settings(request: Request, body: UITTSSettingsRequest) -> dict[str, object]:
+    settings = request.app.state.settings
+    database: SettingsDatabase = request.app.state.database
+    service: TTSService = request.app.state.tts
+    field_map = {
+        "enabled": "tts_enabled",
+        "piper_executable": "tts_piper_executable",
+        "model_root": "tts_model_root",
+        "metadata_path": "tts_metadata_path",
+        "voice_catalog_url": "tts_voice_catalog_url",
+        "voice_catalog_ttl_seconds": "tts_voice_catalog_ttl_seconds",
+        "catalog_language": "tts_voice_catalog_language",
+        "output_device": "tts_output_device",
+        "master_volume": "tts_master_volume",
+        "synthesis_workers": "tts_synthesis_workers",
+        "model_cache_size": "tts_model_cache_size",
+        "max_simultaneous_playback": "tts_max_simultaneous_playback",
+        "max_generated_ahead": "tts_max_generated_ahead",
+        "max_tts_ready_ahead": "tts_max_tts_ready_ahead",
+        "natural_gap_ms": "tts_natural_gap_ms",
+        "synthesis_timeout": "tts_synthesis_timeout",
+        "audio_buffer_ms": "tts_audio_buffer_ms",
+    }
+    values: dict[str, object] = {}
+    supplied = body.model_dump(exclude_none=True)
+    reconfigure_required = False
+    for api_name, setting_name in field_map.items():
+        if api_name in supplied:
+            values[setting_name] = supplied[api_name]
+            setattr(settings, setting_name, supplied[api_name])
+            reconfigure_required = True
+    if body.voice_presets is not None:
+        service.presets.replace(preset.model_dump() for preset in body.voice_presets)
+        values["tts_voice_presets_json"] = settings.tts_voice_presets_json
+    try:
+        database.save_settings(values)
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=500, detail=f"Could not save TTS settings: {error}"
+        ) from error
+    if reconfigure_required or body.voice_presets is not None:
+        await service.reconfigure()
+    LOGGER.info("TTS settings updated enabled=%s", settings.tts_enabled)
+    return {"status": "ok", **service.status()}
+
+
+@router.post("/api/tts/voices/install", tags=["tts"])
+async def install_tts_voice(request: Request, body: UITTSVoiceInstallRequest) -> dict[str, object]:
+    """Start one allow-listed voice installation from the configured catalog."""
+
+    service: TTSService = request.app.state.tts
+    await service.refresh_catalog()
+    try:
+        install = service.start_voice_install(body.voice_model_id)
+    except TTSException as error:
+        status_code = 404 if "not in the catalog" in str(error) else 409
+        service.last_error = str(error)[:500]
+        raise HTTPException(status_code=status_code, detail=service.last_error) from error
+    return {
+        "status": "ok",
+        "accepted": install.get("state") in {"queued", "installing", "complete"},
+        "installed": install.get("state") == "complete",
+        "install": install,
+        "message": (
+            "Voice installation already in progress."
+            if install.get("already_running")
+            else "Voice installation started."
+        ),
+        **service.status(),
+    }
+
+
+@router.get("/api/tts/voices/install/{job_id}", tags=["tts"])
+async def tts_voice_install_status(request: Request, job_id: str) -> dict[str, object]:
+    """Return progress for one background Piper voice installation."""
+
+    service: TTSService = request.app.state.tts
+    try:
+        install = service.install_status(job_id)
+    except TTSException as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"status": "ok", "install": install, **service.status()}
+
+
+@router.post("/api/tts/voices/preview", tags=["tts"])
+async def preview_tts_voice(request: Request, body: UITTSVoicePreviewRequest) -> dict[str, object]:
+    """Play Piper's pre-generated sample without installing the model."""
+
+    service: TTSService = request.app.state.tts
+    await service.refresh_catalog()
+    try:
+        model = await service.preview_voice(body.voice_model_id)
+    except TTSException as error:
+        status_code = 404 if "not in the catalog" in str(error) else 409
+        service.last_error = str(error)[:500]
+        raise HTTPException(status_code=status_code, detail=service.last_error) from error
+    return {
+        "status": "ok",
+        "accepted": True,
+        "voice": model.as_dict(include_download=True),
+        "message": f"Playing the {model.display_name} voice sample.",
+    }
+
+
+@router.post("/api/tts/test", tags=["tts"])
+async def test_tts(request: Request, body: UITTSTestRequest) -> dict[str, object]:
+    service: TTSService = request.app.state.tts
+    accepted = await service.test_voice(body.slot, body.text)
+    if not accepted:
+        raise HTTPException(
+            status_code=409, detail=service.last_error or "TTS test was not accepted"
+        )
+    return {"status": "ok", "accepted": True, "message": "Voice test queued."}
 
 
 @router.post(

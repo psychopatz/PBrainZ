@@ -53,6 +53,29 @@ class Settings(BaseSettings):
     memory_consolidation_turns: int = Field(default=12, ge=2, le=100)
     llm_diagnostics: bool = False
 
+    # TTS is a local presentation enhancement.  It is deliberately disabled
+    # by default and has no bearing on provider, memory, or gameplay calls.
+    tts_enabled: bool = False
+    tts_piper_executable: str = "piper"
+    tts_model_root: str | None = None
+    tts_metadata_path: str | None = None
+    tts_voice_catalog_url: str = (
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
+    )
+    tts_voice_catalog_ttl_seconds: int = Field(default=86400, ge=60, le=2592000)
+    tts_voice_catalog_language: str = Field(default="English", max_length=64)
+    tts_output_device: str = ""
+    tts_master_volume: float = Field(default=1.0, ge=0, le=1)
+    tts_synthesis_workers: int = Field(default=1, ge=1, le=4)
+    tts_model_cache_size: int = Field(default=2, ge=1, le=16)
+    tts_max_simultaneous_playback: int = Field(default=4, ge=1, le=8)
+    tts_max_generated_ahead: int = Field(default=3, ge=1, le=16)
+    tts_max_tts_ready_ahead: int = Field(default=1, ge=1, le=8)
+    tts_natural_gap_ms: int = Field(default=180, ge=0, le=2000)
+    tts_synthesis_timeout: float = Field(default=45.0, gt=0, le=300)
+    tts_audio_buffer_ms: int = Field(default=50, ge=0, le=2000)
+    tts_voice_presets_json: str = "{}"
+
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_models: str = "gpt-4o-mini"

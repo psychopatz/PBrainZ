@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
-from hoomans_llm.bridge import BridgeRuntimeMonitor
-from hoomans_llm.bridge_client import run_bridge_pump
 from hoomans_llm.config import Settings
 from hoomans_llm.providers.registry import ProviderRegistry
+from hoomans_llm.tts import TTSService
+
+from .pump import run_bridge_pump
+from .state import BridgeRuntimeMonitor
 
 
 class BridgeController:
@@ -18,10 +20,12 @@ class BridgeController:
         settings: Settings,
         providers: ProviderRegistry,
         monitor: BridgeRuntimeMonitor,
+        tts_service: TTSService | None = None,
     ) -> None:
         self.settings = settings
         self.providers = providers
         self.monitor = monitor
+        self.tts_service = tts_service
         self._enabled = settings.bridge_required
         self._task: asyncio.Task[None] | None = None
 
@@ -40,7 +44,12 @@ class BridgeController:
     async def start(self) -> None:
         if not self.running:
             self._task = asyncio.create_task(
-                run_bridge_pump(self.settings, self.providers, self.monitor),
+                run_bridge_pump(
+                    self.settings,
+                    self.providers,
+                    self.monitor,
+                    self.tts_service,
+                ),
                 name="project-hoomans-llm-bridge",
             )
 
@@ -69,3 +78,4 @@ class BridgeController:
             "worker_enabled": self.enabled,
             "worker_running": self.running,
         }
+

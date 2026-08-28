@@ -51,6 +51,24 @@ PERSISTED_SETTINGS = (
     "memory_retrieval_limit",
     "memory_consolidation_turns",
     "llm_diagnostics",
+    "tts_enabled",
+    "tts_piper_executable",
+    "tts_model_root",
+    "tts_metadata_path",
+    "tts_voice_catalog_url",
+    "tts_voice_catalog_ttl_seconds",
+    "tts_voice_catalog_language",
+    "tts_output_device",
+    "tts_master_volume",
+    "tts_synthesis_workers",
+    "tts_model_cache_size",
+    "tts_max_simultaneous_playback",
+    "tts_max_generated_ahead",
+    "tts_max_tts_ready_ahead",
+    "tts_natural_gap_ms",
+    "tts_synthesis_timeout",
+    "tts_audio_buffer_ms",
+    "tts_voice_presets_json",
 )
 
 
@@ -337,28 +355,32 @@ def _decode_value(value: object) -> Any:
 
 
 def _default_database_path() -> Path:
-    """Choose a writable persistent location for source and frozen builds."""
-    if sys.platform.startswith("linux"):
-        config_root = os.getenv("XDG_CONFIG_HOME")
-        base = Path(config_root).expanduser() if config_root else Path.home() / ".config"
-        return base / "HoomansLLM" / DEFAULT_DATABASE_NAME
-    if not getattr(sys, "frozen", False):
-        return Path.cwd() / DEFAULT_DATABASE_NAME
-    if os.name == "nt":
-        return Path(sys.executable).resolve().parent / DEFAULT_DATABASE_NAME
-    return Path.cwd() / DEFAULT_DATABASE_NAME
+    """Choose the portable data directory beside the running application."""
+    return application_root() / "data" / DEFAULT_DATABASE_NAME
+
+
+def application_root() -> Path:
+    """Return the directory that should contain portable application data."""
+    configured_root = os.getenv("HOOMANSLLM_PORTABLE_ROOT")
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
+    appimage_path = os.getenv("APPIMAGE")
+    if appimage_path:
+        return Path(appimage_path).expanduser().resolve().parent
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path.cwd()
 
 
 def legacy_database_candidates() -> tuple[Path, ...]:
-    """Return safe sidecar locations that may contain a pre-XDG database."""
-    candidates = [Path.cwd() / DEFAULT_DATABASE_NAME]
-    if getattr(sys, "frozen", False):
-        appimage_path = os.getenv("APPIMAGE")
-        if appimage_path:
-            appimage_directory = Path(appimage_path).expanduser().resolve().parent
-            candidates.extend(
-                directory / DEFAULT_DATABASE_NAME
-                for directory in (appimage_directory, *appimage_directory.parents[:3])
-            )
+    """Return safe locations that may contain a database from an older release."""
+    config_root = os.getenv("XDG_CONFIG_HOME")
+    xdg_root = Path(config_root).expanduser() if config_root else Path.home() / ".config"
+    candidates = [
+        Path.cwd() / DEFAULT_DATABASE_NAME,
+        xdg_root / "HoomansLLM" / DEFAULT_DATABASE_NAME,
+    ]
+    if getattr(sys, "frozen", False) or os.getenv("APPIMAGE"):
+        candidates.append(application_root() / DEFAULT_DATABASE_NAME)
         candidates.append(Path(sys.executable).resolve().parent / DEFAULT_DATABASE_NAME)
     return tuple(dict.fromkeys(candidates))

@@ -66,19 +66,63 @@ The panel's Chat test tab and Test API button send direct provider requests
 through `/api/chat`, so providers can be checked before Project Hoomans is
 running. The game-facing `/v1/chat/completions` endpoint remains bridge-gated.
 
+The optional TTS tab configures local Piper synthesis and OS audio playback.
+TTS is disabled by default. The TTS tab loads Piper's official remote voice
+catalog, clearly marks each voice as `Installed` or `Not installed`, and can
+download the model and adjacent `.onnx.json` config directly with checksum
+verification. Installed files are placed under the configured model root.
+The `piper-tts` runtime is included in source installs and release bundles, so
+an installed voice can be synthesized locally when an OS audio player such as
+`ffplay` is available.
+Press `Refresh catalog` to update the remote list. Select a voice and use
+`Test selected voice` to play Piper's pre-generated sample without installing
+the model; `Install selected voice` downloads it for local synthesis with a
+live progress bar and prevents duplicate installations. The
+selected catalog language is saved automatically. Piper model metadata is read
+from each adjacent `.onnx.json` file. The catalog's gender filter uses
+best-effort hints for named voices and labels multi-speaker voices as `mixed`;
+Piper does not publish gender metadata. Add a local `voice_metadata.json`
+overlay when you want to override a label, such as:
+
+```json
+{
+  "voices": {
+    "en_US-lessac-medium": {"gender": "female", "display_name": "Lessac"}
+  }
+}
+```
+
+Click any catalog column heading to toggle ascending and descending order;
+the selected voice remains selected while filters, refreshes, and sorting rerender the list.
+
+Voice presets map the canonical Project Hoomans slots (`VoiceFemale:0` through
+`VoiceMale:3`) to local Piper model IDs. Model paths and IDs remain inside
+HoomansLLM and never enter Project Hoomans NPC data or the bridge audio path.
+Preset selections are saved automatically when a combobox changes. Female and
+male preset groups default to their matching gender, with a checkbox on each
+group to show all installed genders. Each option includes its gender label,
+such as `female`, `male`, `mixed`, or `unknown`.
+TTS performance tuning is available in the main `Settings` tab; the TTS tab is
+kept focused on voice installation, presets, and playback controls.
+When enabled, HoomansLLM plays the local WAV output and sends only compact
+speech lifecycle events so the game can synchronize its existing subtitles.
+Missing Piper, models, or audio output automatically falls back to text-only
+conversation.
+
 `tkinter` is included with standard Windows Python installations. On Linux,
 install the distribution's Tk package if it is missing (for example,
 `sudo apt install python3-tk` on Debian/Ubuntu).
 
-The first launch creates a persistent SQLite file for settings, provider
-credentials, model catalogs, and recent activity. On Linux, the source
-launcher and AppImage share `~/.config/HoomansLLM/hoomansllm.db`; on Windows,
-the database remains beside the launcher or executable. An existing legacy
-`hoomansllm.db` beside the Linux launcher or AppImage is imported once when
-the new store has not been configured. Existing `.env` or `.env.local` values
-are also imported once when the database is first created, then the
-GUI/database are used instead. The database is local-only and should be kept
-private.
+The first launch creates a portable `data/` directory beside the running
+program. It contains the SQLite file for settings, provider credentials, model
+catalogs, recent activity, TTS models, and memory. The source launchers and
+the AppImage use the directory in which they are installed; this keeps each
+copy self-contained and movable. Set `HOOMANSLLM_DB` to override the database
+location. Existing legacy databases from the working directory or Linux
+`~/.config/HoomansLLM/` are imported once when the portable store has not been
+configured. Existing `.env` or `.env.local` values are also imported once
+when the database is first created. The database is local-only and should be
+kept private.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
 startup without network requests. The panel's Refresh models button updates
@@ -91,11 +135,6 @@ executable build. Python virtual environments are isolated but are not
 guaranteed to be relocatable across machines; if the project moves to a
 different machine or Python installation, rerun the platform installer to
 recreate `.venv`.
-
-When running a frozen Windows executable, the portable SQLite database is
-stored beside the executable. An AppImage stores its database in
-`~/.config/HoomansLLM/` because the AppImage filesystem is read-only. Set
-`HOOMANSLLM_DB` to override either location.
 
 ## Build release artifacts
 
@@ -234,9 +273,10 @@ Submit a message there; the game sends the current NPC conversation history to
 the bridge, HoomansLLM calls the selected provider, and the NPC reply is added
 to the conversation log.
 
-The game-side capability is intentionally limited to `pollChat` and
-`deliverChat` in the `projecthoomans.llm` namespace. Requests are tied to the
-current runtime ID and the active NPC conversation. Provider keys remain in
+The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
+and compact `speechStarted`/`speechFinished`/`speechFallback` events in the
+`projecthoomans.llm` namespace. Requests are tied to the current runtime ID
+and the active NPC conversation. Provider keys remain in
 HoomansLLM's local SQLite database and never enter the game tunnel.
 
 The structured game request also carries a compact canonical character card,

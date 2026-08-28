@@ -202,6 +202,21 @@ def test_control_panel_persists_theme(tmp_path) -> None:
     assert json.loads(saved["ui_theme"]) == "dark"
 
 
+def test_tts_settings_persist_catalog_language(tmp_path) -> None:
+    with _client(str(tmp_path)) as client:
+        response = client.post(
+            "/api/tts/settings",
+            json={"catalog_language": "English"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["catalog_language"] == "English"
+    database = sqlite3.connect(tmp_path / "hoomansllm.db")
+    saved = dict(database.execute("SELECT key, value FROM settings").fetchall())
+    database.close()
+    assert json.loads(saved["tts_voice_catalog_language"]) == "English"
+
+
 def test_control_panel_saves_provider_settings(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     with _client(str(tmp_path / "bridge")) as client:
@@ -224,6 +239,29 @@ def test_control_panel_saves_provider_settings(monkeypatch, tmp_path) -> None:
     database.close()
     assert json.loads(saved["default_provider"]) == "gemini"
     assert json.loads(saved["request_timeout"]) == 45.0
+
+
+def test_control_panel_saves_tts_performance_in_settings(tmp_path) -> None:
+    with _client(str(tmp_path / "bridge")) as client:
+        response = client.post(
+            "/api/settings",
+            json={
+                "tts_synthesis_workers": 2,
+                "tts_model_cache_size": 4,
+                "tts_max_simultaneous_playback": 6,
+                "tts_max_generated_ahead": 5,
+                "tts_max_tts_ready_ahead": 2,
+                "tts_natural_gap_ms": 120,
+                "tts_synthesis_timeout": 30,
+                "tts_audio_buffer_ms": 80,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tts_synthesis_workers"] == 2
+    assert body["tts_model_cache_size"] == 4
+    assert body["tts_audio_buffer_ms"] == 80
 
 
 def test_control_panel_can_toggle_bridge_worker(monkeypatch, tmp_path) -> None:
@@ -375,6 +413,36 @@ def test_control_panel_chat_can_test_provider_without_bridge() -> None:
     assert response.json()["choices"][0]["message"] == {
         "role": "assistant",
         "content": "reply from gemini",
+    }
+
+
+def test_tts_settings_are_separate_and_persist_without_a_game_bridge(tmp_path) -> None:
+    with _client(str(tmp_path / "bridge")) as client:
+        status = client.get("/api/tts")
+        response = client.post(
+            "/api/tts/settings",
+            json={
+                "enabled": True,
+                "master_volume": 0.65,
+                "max_generated_ahead": 4,
+                "voice_presets": [{"slot": "VoiceFemale:0", "voice_model_id": "example-model"}],
+            },
+        )
+
+    assert status.status_code == 200
+    assert status.json()["enabled"] is False
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert response.json()["max_generated_ahead"] == 4
+    assert response.json()["presets"][0]["slot"] == "VoiceFemale:0"
+    assert response.json()["presets"][0]["voice_model_id"] == "example-model"
+    database = sqlite3.connect(tmp_path / "bridge" / "hoomansllm.db")
+    saved = dict(database.execute("SELECT key, value FROM settings").fetchall())
+    database.close()
+    assert json.loads(json.loads(saved["tts_voice_presets_json"]))["VoiceFemale:0"] == {
+        "slot": "VoiceFemale:0",
+        "voice_model_id": "example-model",
+        "optional_speaker_id": None,
     }
 
 

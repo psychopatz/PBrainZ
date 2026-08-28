@@ -42,6 +42,7 @@ def main() -> int:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "data").mkdir(exist_ok=True)
 
     bundle = _build_pyinstaller(target, staging)
     if target == "exe":
@@ -134,10 +135,14 @@ def _build_pyinstaller(target: str, staging: Path) -> Path:
         "google.genai.types",
         "--hidden-import",
         "openai",
+        "--hidden-import",
+        "piper",
         "--collect-submodules",
         "uvicorn",
         "--collect-data",
         "google.genai",
+        "--collect-data",
+        "piper",
     ]
     command.append("--onefile" if target == "exe" else "--onedir")
     command.append(str(PACKAGING_ROOT / "launcher.py"))
@@ -171,6 +176,11 @@ def _build_appimage(
     app_run.write_text(
         '#!/bin/sh\n'
         'HERE="$(dirname "$(readlink -f "$0")")"\n'
+        'if [ -n "${APPIMAGE:-}" ]; then\n'
+        '    export HOOMANSLLM_PORTABLE_ROOT="$(dirname "$(readlink -f "$APPIMAGE")")"\n'
+        'else\n'
+        '    export HOOMANSLLM_PORTABLE_ROOT="$HERE"\n'
+        'fi\n'
         'exec "$HERE/usr/lib/HoomansLLM/HoomansLLM" "$@"\n',
         encoding="utf-8",
     )

@@ -1,0 +1,63 @@
+"""Compatibility facade for the modular local Piper TTS subsystem.
+
+The implementation is split by responsibility, while this module retains the
+historical import path used by the application and integrations.
+"""
+
+from urllib.request import urlopen as _urlopen
+
+from .audio import AudioOutput, PiperModelCache, PiperProvider
+from .catalog import VoiceCatalog
+from .models import (
+    MAX_CATALOG_MODELS,
+    MAX_DOWNLOAD_BYTES,
+    MAX_PREVIEW_BYTES,
+    MAX_REMOTE_CATALOG_BYTES,
+    MAX_TEST_TEXT,
+    OFFICIAL_PIPER_CATALOG_URL,
+    OFFICIAL_PIPER_REPOSITORY_URL,
+    OFFICIAL_PIPER_SAMPLES_URL,
+    VOICE_PRESET_SLOTS,
+    DownloadProgressCallback,
+    FailureCallback,
+    InstallProgressCallback,
+    SpeechCallback,
+    SynthesizedAudio,
+    TTSException,
+    TTSVoicePreset,
+    VoiceModel,
+    VoicePresetRepository,
+)
+from .scheduler import SpeechScheduler, SynthesisQueue
+from .service import TTSService
+
+urlopen = _urlopen
+
+__all__ = [
+    "AudioOutput",
+    "DownloadProgressCallback",
+    "FailureCallback",
+    "InstallProgressCallback",
+    "MAX_CATALOG_MODELS",
+    "MAX_DOWNLOAD_BYTES",
+    "MAX_PREVIEW_BYTES",
+    "MAX_REMOTE_CATALOG_BYTES",
+    "MAX_TEST_TEXT",
+    "OFFICIAL_PIPER_CATALOG_URL",
+    "OFFICIAL_PIPER_REPOSITORY_URL",
+    "OFFICIAL_PIPER_SAMPLES_URL",
+    "PiperModelCache",
+    "PiperProvider",
+    "SynthesisQueue",
+    "SpeechCallback",
+    "SpeechScheduler",
+    "SynthesizedAudio",
+    "TTSException",
+    "TTSService",
+    "TTSVoicePreset",
+    "VOICE_PRESET_SLOTS",
+    "VoiceCatalog",
+    "VoiceModel",
+    "VoicePresetRepository",
+]
+

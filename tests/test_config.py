@@ -1,5 +1,23 @@
+import sys
+
 from hoomans_llm.config import get_settings
-from hoomans_llm.database import SettingsDatabase
+from hoomans_llm.database import SettingsDatabase, _default_database_path
+
+
+def test_default_database_is_portable_for_source_launches(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+
+    assert _default_database_path() == tmp_path / "data" / "hoomansllm.db"
+
+
+def test_default_database_is_portable_beside_appimage(tmp_path, monkeypatch) -> None:
+    appimage = tmp_path / "release" / "HoomansLLM.AppImage"
+    monkeypatch.setenv("APPIMAGE", str(appimage))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    assert _default_database_path() == tmp_path / "release" / "data" / "hoomansllm.db"
 
 
 def test_explicit_environment_values_override_legacy_dotenv(tmp_path, monkeypatch) -> None:
