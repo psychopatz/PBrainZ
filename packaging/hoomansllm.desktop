@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=HoomansLLM
-Comment=Project Hoomans local LLM control panel and bridge
-Exec=HoomansLLM
-Icon=hoomansllm
-Terminal=false
-Type=Application
-Categories=Utility;

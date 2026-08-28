@@ -1,4 +1,4 @@
-from hoomans_llm.game_bridge_settings import GameBridgeSettings, parse_config
+from pbrainz.game_bridge_settings import GameBridgeSettings, parse_config
 
 
 def test_parse_config_matches_core_defaults() -> None:

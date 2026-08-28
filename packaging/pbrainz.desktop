@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=P BrainZ
+Comment=Local AI control panel and bridge for Project Zomboid mods
+Exec=PBrainZ
+Icon=pbrainz
+StartupWMClass=Pbrainz
+Terminal=false
+Type=Application
+Categories=Utility;

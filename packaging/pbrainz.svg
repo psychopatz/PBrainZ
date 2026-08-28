@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+<title id="title">Pink bitten brain and robot app icon</title>
+<desc id="desc">Pink brain with a natural three-scallop bite on the left and a mint robot face in the lower-right.</desc>
+<defs>
+  <radialGradient id="bg" cx="50%" cy="43%" r="72%">
+    <stop offset="0" stop-color="#1e2a43"/><stop offset="0.65" stop-color="#162138"/><stop offset="1" stop-color="#101725"/>
+  </radialGradient>
+  <linearGradient id="brain" x1="22" y1="20" x2="108" y2="102" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#fb8fbd"/><stop offset="0.42" stop-color="#f77aaf"/><stop offset="1" stop-color="#ed5b9a"/>
+  </linearGradient>
+  <linearGradient id="face" x1="74" y1="72" x2="113" y2="104" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#f9fcff"/><stop offset="1" stop-color="#dce8f5"/>
+  </linearGradient>
+  <linearGradient id="ear" x1="68" y1="82" x2="117" y2="96" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#bccdde"/><stop offset="1" stop-color="#94a9c0"/>
+  </linearGradient>
+  <linearGradient id="mint" x1="80" y1="80" x2="106" y2="89" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#58d9c2"/><stop offset="1" stop-color="#43cdb4"/>
+  </linearGradient>
+  <clipPath id="brainClip"><path d="M 96.25,27.00 L 93.50,25.00 L 91.00,23.75 L 86.25,22.50 L 82.75,22.50 L 80.25,21.00 L 75.50,19.75 L 71.00,20.00 L 67.75,21.00 L 64.25,23.00 L 61.25,25.75 L 60.25,25.50 L 59.25,24.50 L 55.50,22.25 L 49.25,20.50 L 43.50,20.50 L 40.00,21.25 L 36.25,22.75 L 32.00,25.75 L 29.75,28.25 L 27.50,32.00 L 26.00,36.75 L 26.00,38.50 L 23.75,40.50 L 22.25,43.00 L 22.25,44.00 L 22.75,44.50 L 24.00,44.50 L 26.25,45.50 L 28.00,47.25 L 29.00,50.25 L 28.50,53.25 L 29.75,53.25 L 31.25,54.00 L 33.00,55.75 L 34.00,58.50 L 33.50,61.00 L 32.50,62.50 L 31.00,63.75 L 29.00,64.75 L 29.50,66.50 L 29.50,68.00 L 28.50,70.75 L 26.75,72.50 L 24.50,73.50 L 21.75,73.50 L 20.75,73.00 L 19.75,76.75 L 20.00,83.25 L 21.50,87.75 L 25.00,93.50 L 28.75,97.25 L 32.00,99.50 L 36.25,101.50 L 40.25,102.50 L 46.00,102.75 L 50.75,101.75 L 55.00,99.75 L 59.25,96.25 L 59.75,96.25 L 63.00,99.50 L 66.75,101.75 L 70.75,103.00 L 74.00,103.25 L 72.75,100.75 L 72.50,98.50 L 69.75,97.25 L 68.75,96.25 L 67.75,94.00 L 67.75,85.50 L 68.50,83.75 L 70.25,82.00 L 72.50,81.25 L 72.50,79.75 L 73.25,77.25 L 75.25,74.00 L 78.00,71.75 L 81.75,70.25 L 84.75,70.25 L 85.00,70.00 L 92.50,70.25 L 92.50,67.75 L 91.75,67.50 L 90.50,66.25 L 89.75,63.50 L 90.00,62.25 L 90.75,61.00 L 92.25,59.75 L 93.75,59.25 L 95.00,59.25 L 96.75,60.00 L 98.00,61.25 L 98.75,63.00 L 98.75,64.50 L 98.00,66.25 L 96.75,67.50 L 96.00,67.75 L 96.00,70.25 L 106.50,70.25 L 107.00,68.00 L 107.00,63.00 L 105.75,58.50 L 107.25,55.50 L 108.00,52.25 L 107.75,46.00 L 106.50,42.25 L 105.50,40.50 L 103.25,37.75 L 101.75,36.50 L 101.25,34.50 L 99.75,31.25 Z"/></clipPath>
+  <filter id="shadow" x="-30%" y="-35%" width="170%" height="180%"><feGaussianBlur stdDeviation="2.4"/></filter>
+</defs>
+
+<rect width="128" height="128" rx="24" fill="url(#bg)"/>
+
+<!-- Brain silhouette traced from the approved generated reference, including the bite -->
+<path d="M 96.25,27.00 L 93.50,25.00 L 91.00,23.75 L 86.25,22.50 L 82.75,22.50 L 80.25,21.00 L 75.50,19.75 L 71.00,20.00 L 67.75,21.00 L 64.25,23.00 L 61.25,25.75 L 60.25,25.50 L 59.25,24.50 L 55.50,22.25 L 49.25,20.50 L 43.50,20.50 L 40.00,21.25 L 36.25,22.75 L 32.00,25.75 L 29.75,28.25 L 27.50,32.00 L 26.00,36.75 L 26.00,38.50 L 23.75,40.50 L 22.25,43.00 L 22.25,44.00 L 22.75,44.50 L 24.00,44.50 L 26.25,45.50 L 28.00,47.25 L 29.00,50.25 L 28.50,53.25 L 29.75,53.25 L 31.25,54.00 L 33.00,55.75 L 34.00,58.50 L 33.50,61.00 L 32.50,62.50 L 31.00,63.75 L 29.00,64.75 L 29.50,66.50 L 29.50,68.00 L 28.50,70.75 L 26.75,72.50 L 24.50,73.50 L 21.75,73.50 L 20.75,73.00 L 19.75,76.75 L 20.00,83.25 L 21.50,87.75 L 25.00,93.50 L 28.75,97.25 L 32.00,99.50 L 36.25,101.50 L 40.25,102.50 L 46.00,102.75 L 50.75,101.75 L 55.00,99.75 L 59.25,96.25 L 59.75,96.25 L 63.00,99.50 L 66.75,101.75 L 70.75,103.00 L 74.00,103.25 L 72.75,100.75 L 72.50,98.50 L 69.75,97.25 L 68.75,96.25 L 67.75,94.00 L 67.75,85.50 L 68.50,83.75 L 70.25,82.00 L 72.50,81.25 L 72.50,79.75 L 73.25,77.25 L 75.25,74.00 L 78.00,71.75 L 81.75,70.25 L 84.75,70.25 L 85.00,70.00 L 92.50,70.25 L 92.50,67.75 L 91.75,67.50 L 90.50,66.25 L 89.75,63.50 L 90.00,62.25 L 90.75,61.00 L 92.25,59.75 L 93.75,59.25 L 95.00,59.25 L 96.75,60.00 L 98.00,61.25 L 98.75,63.00 L 98.75,64.50 L 98.00,66.25 L 96.75,67.50 L 96.00,67.75 L 96.00,70.25 L 106.50,70.25 L 107.00,68.00 L 107.00,63.00 L 105.75,58.50 L 107.25,55.50 L 108.00,52.25 L 107.75,46.00 L 106.50,42.25 L 105.50,40.50 L 103.25,37.75 L 101.75,36.50 L 101.25,34.50 L 99.75,31.25 Z" fill="url(#brain)"/>
+
+<g clip-path="url(#brainClip)">
+  <path d="M60.7 25.8 C57.9 34.7 59.0 42.4 61.1 49.2 C58.9 56.8 58.4 64.7 60.9 72.2 C58.7 79.9 58.5 88.0 59.7 95.5" fill="none" stroke="#ae316e" stroke-width="3.1" stroke-linecap="round" opacity=".73"/>
+  <g fill="none" stroke="#c43f7e" stroke-width="3.25" stroke-linecap="round" stroke-linejoin="round" opacity=".71">
+    <path d="M45.4 27.5 C50.5 29.8 51.0 34.9 49.6 38.5 C45.2 40.1 43.4 44.5 44.7 49.1"/>
+    <path d="M29.5 43.6 C33.6 42.0 38.0 43.9 38.4 48.0 C36.1 49.9 35.7 52.0 36.8 53.9"/>
+    <path d="M31.9 56.4 C36.9 53.8 42.1 56.4 42.6 61.3 C39.2 64.4 36.4 68.3 38.0 73.4"/>
+    <path d="M29.1 82.8 C34.7 78.2 42.4 79.1 46.3 84.1 C43.3 88.1 44.0 93.1 47.9 96.3"/>
+  </g>
+  <g fill="none" stroke="#c33b79" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round" opacity=".69">
+    <path d="M69.8 27.6 C75.4 24.9 81.0 27.2 82.0 32.8 C78.8 36.7 79.5 41.7 83.1 44.2"/>
+    <path d="M88.8 31.8 C93.8 35.4 94.2 41.7 91.0 45.9 C86.7 47.6 84.4 51.8 85.7 56.0"/>
+    <path d="M69.8 51.5 C75.2 48.5 81.5 50.0 84.0 54.8 C81.0 58.5 81.4 63.3 84.7 66.6"/>
+    <path d="M69.3 74.8 C73.6 71.1 79.5 69.9 84.4 72.5 C85.5 77.0 88.4 80.0 92.0 81.2"/>
+  </g>
+  <path d="M29.4 35.0 C34.5 26.8 44.5 23.6 53.4 27.4" fill="none" stroke="#ffd0e2" stroke-width="3.3" stroke-linecap="round" opacity=".66"/>
+  <path d="M67.8 26.9 C75.7 23.7 84.0 25.0 90.2 31.0" fill="none" stroke="#ffc3da" stroke-width="3.1" stroke-linecap="round" opacity=".55"/>
+</g>
+
+<!-- Robot shadow and body -->
+<rect x="69" y="72" width="47" height="36" rx="11" fill="#080f1d" opacity=".34" filter="url(#shadow)"/>
+<g>
+  <path d="M92.8 70 V66.1" stroke="#aabfd0" stroke-width="2.8" stroke-linecap="round"/>
+  <circle cx="92.8" cy="62.5" r="4.15" fill="#131d31"/><circle cx="92.8" cy="62.5" r="2.45" fill="url(#mint)"/>
+  <rect x="66.5" y="80.9" width="8.2" height="15.7" rx="4" fill="#121c30"/><rect x="68.7" y="82.5" width="4.2" height="12.4" rx="2.1" fill="url(#ear)"/>
+  <rect x="111.1" y="80.9" width="8.2" height="15.7" rx="4" fill="#121c30"/><rect x="113" y="82.5" width="4.2" height="12.4" rx="2.1" fill="url(#ear)"/>
+  <rect x="71.4" y="69.9" width="43.6" height="36.3" rx="10" fill="#111a2d"/>
+  <rect x="74" y="72.1" width="38.4" height="31.8" rx="7.8" fill="url(#face)"/>
+  <path d="M72.1 83.5 H114.5" stroke="#b7c8da" stroke-width="2.2" opacity=".56"/>
+  <rect x="79.6" y="80.8" width="7.5" height="7.5" rx="2.35" fill="url(#mint)"/><rect x="98.8" y="80.8" width="7.5" height="7.5" rx="2.35" fill="url(#mint)"/>
+  <circle cx="83.35" cy="84.55" r="1.25" fill="#efffff"/><circle cx="102.55" cy="84.55" r="1.25" fill="#efffff"/>
+  <path d="M81.9 96.3 H86.7 M89.4 96.3 H95.9 M98.7 96.3 H102.8" fill="none" stroke="#52677e" stroke-width="2.75" stroke-linecap="round"/>
+</g>
+</svg>

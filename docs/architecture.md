@@ -1,7 +1,7 @@
-# Project Hoomans LLM foundation
+# P BrainZ architecture
 
 This document describes the production-oriented foundation shared by Project
-Hoomans and HoomansLLM. The profiler is not part of this boundary.
+Hoomans and P BrainZ. The profiler is not part of this boundary.
 
 ## Responsibilities
 
@@ -10,7 +10,7 @@ Project Hoomans client
   -> compact conversation context + stable identities
 PsychopatzCore file bridge
   -> pollChat / deliverChat
-HoomansLLM bridge pump
+P BrainZ bridge pump
   -> ConversationService
      -> MemoryStore + MemoryRetriever (SQLite)
      -> ContextBuilder (bounded provider messages)
@@ -21,7 +21,7 @@ Project Hoomans Commands/Queries
 ```
 
 Project Hoomans owns gameplay state, conversation presentation, identity
-resolution, and all gameplay mutations. HoomansLLM owns provider
+resolution, and all gameplay mutations. P BrainZ owns provider
 communication, prompt/context assembly, transcript persistence, retrieval, and
 memory consolidation. Python never writes NPC state, relationship values,
 inventory, health, tasks, factions, or combat state.
@@ -38,10 +38,9 @@ game state database. It contains:
   preferences, recent dialogue, and current player message;
 - only the semantic tools exposed for the current NPC/context.
 
-The Python boundary accepts both camelCase and snake_case IDs for compatibility,
-but requires all three scope IDs and the current message for structured NPC
-dialogue. The older direct `messages` bridge shape remains supported for
-backward compatibility and does not use NPC memory.
+The Python boundary accepts both camelCase and snake_case IDs, but requires all
+three scope IDs and the current message for structured NPC dialogue. Direct
+`messages` bridge requests do not use NPC memory.
 
 ## Memory schema and isolation
 
@@ -107,9 +106,9 @@ registered behind the same boundary.
 ## Single-player and multiplayer
 
 In single-player the local client publishes the pending conversation through
-the local PsychopatzCore bridge and HoomansLLM returns the response. In
+the local PsychopatzCore bridge and P BrainZ returns the response. In
 multiplayer, the client still supplies only its scoped context and semantic
-request. HoomansLLM has no authority to mutate server state; any order must
+request. P BrainZ has no authority to mutate server state; any order must
 travel through Project Hoomans' normal server-validated command path. Stable
 player character IDs keep separate players' memory scopes isolated.
 
@@ -133,7 +132,7 @@ player character IDs keep separate players' memory scopes isolated.
 ## Testing and future hooks
 
 Python tests cover save/pair isolation, shared schema, FTS fallback behavior,
-context budgeting, service consolidation, legacy bridge compatibility, and
+context budgeting, service consolidation, bridge request handling, and
 semantic tool allow-listing. Project Hoomans has a Lua smoke test for stable
 save/player/NPC identity, compact context, and tool construction.
 

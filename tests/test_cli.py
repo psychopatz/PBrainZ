@@ -1,18 +1,18 @@
 import json
 
-from hoomans_llm.__main__ import _show_activity
-from hoomans_llm.config import Settings
-from hoomans_llm.database import SettingsDatabase
+from pbrainz.__main__ import _show_activity
+from pbrainz.config import Settings
+from pbrainz.database import SettingsDatabase
 
 
 def test_show_activity_defaults_to_bounded_recent_entries(monkeypatch, tmp_path, capsys) -> None:
-    database_path = tmp_path / "hoomansllm.db"
+    database_path = tmp_path / "pbrainz.db"
     database = SettingsDatabase(database_path)
     database.initialize()
     for index in range(60):
         database.add_log("INFO", "test", f"event-{index}")
     settings = Settings(database_path=str(database_path), bridge_required=False)
-    monkeypatch.setattr("hoomans_llm.__main__.get_settings", lambda: settings)
+    monkeypatch.setattr("pbrainz.__main__.get_settings", lambda: settings)
 
     _show_activity(50)
 
@@ -23,12 +23,12 @@ def test_show_activity_defaults_to_bounded_recent_entries(monkeypatch, tmp_path,
 
 
 def test_show_activity_can_emit_json(monkeypatch, tmp_path, capsys) -> None:
-    database_path = tmp_path / "hoomansllm.db"
+    database_path = tmp_path / "pbrainz.db"
     database = SettingsDatabase(database_path)
     database.initialize()
     database.add_log("INFO", "test", "bridge task")
     settings = Settings(database_path=str(database_path), bridge_required=False)
-    monkeypatch.setattr("hoomans_llm.__main__.get_settings", lambda: settings)
+    monkeypatch.setattr("pbrainz.__main__.get_settings", lambda: settings)
 
     _show_activity(50, as_json=True)
 

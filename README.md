@@ -1,7 +1,8 @@
-# HoomansLLM
+# P BrainZ
 
-HoomansLLM is a small local LLM gateway for Project Hoomans. It exposes an
-OpenAI-compatible Chat Completions API and keeps provider-specific code behind
+P BrainZ is a modular local AI gateway and control panel for Project Zomboid
+mods. It exposes an OpenAI-compatible Chat Completions API, local voice
+playback, memory, and game bridges while keeping provider-specific code behind
 one async adapter interface.
 
 The first release supports:
@@ -49,12 +50,12 @@ developers who want the test and lint dependencies installed as well.
 
 The server listens on `http://127.0.0.1:8000` by default. For development, you
 can still activate the environment (`source .venv/bin/activate` on Linux/macOS
-or `.\.venv\Scripts\Activate.ps1` on Windows) and run `python -m hoomans_llm`
+or `.\.venv\Scripts\Activate.ps1` on Windows) and run `p-brainz`
 directly.
 
 When started by either launcher, a lightweight native Python `tkinter` control
 panel opens automatically. It shows whether the Project Hoomans bridge is
-detected and ready, whether the local HoomansLLM bridge worker is running, and
+detected and ready, whether the local P BrainZ bridge worker is running, and
 whether each provider is configured. It also allows the default provider,
 model, timeout, polling interval, and Project Hoomans bridge setting to be
 changed. These settings and API keys are saved in the local SQLite database;
@@ -97,14 +98,14 @@ the selected voice remains selected while filters, refreshes, and sorting rerend
 
 Voice presets map the canonical Project Hoomans slots (`VoiceFemale:0` through
 `VoiceMale:3`) to local Piper model IDs. Model paths and IDs remain inside
-HoomansLLM and never enter Project Hoomans NPC data or the bridge audio path.
+P BrainZ and never enter Project Hoomans NPC data or the bridge audio path.
 Preset selections are saved automatically when a combobox changes. Female and
 male preset groups default to their matching gender, with a checkbox on each
 group to show all installed genders. Each option includes its gender label,
 such as `female`, `male`, `mixed`, or `unknown`.
 TTS performance tuning is available in the main `Settings` tab; the TTS tab is
 kept focused on voice installation, presets, and playback controls.
-When enabled, HoomansLLM plays the local WAV output and sends only compact
+When enabled, P BrainZ plays the local WAV output and sends only compact
 speech lifecycle events so the game can synchronize its existing subtitles.
 Missing Piper, models, or audio output automatically falls back to text-only
 conversation.
@@ -117,12 +118,9 @@ The first launch creates a portable `data/` directory beside the running
 program. It contains the SQLite file for settings, provider credentials, model
 catalogs, recent activity, TTS models, and memory. The source launchers and
 the AppImage use the directory in which they are installed; this keeps each
-copy self-contained and movable. Set `HOOMANSLLM_DB` to override the database
-location. Existing legacy databases from the working directory or Linux
-`~/.config/HoomansLLM/` are imported once when the portable store has not been
-configured. Existing `.env` or `.env.local` values are also imported once
-when the database is first created. The database is local-only and should be
-kept private.
+copy self-contained and movable. Set `PBRAINZ_DB` to override the database
+location. The database is created fresh for each portable copy, is local-only,
+and should be kept private.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
 startup without network requests. The panel's Refresh models button updates
@@ -156,8 +154,8 @@ Pushing a `v*` tag runs both builds through
 `.github/workflows/release.yml` and attaches the artifacts to a GitHub Release.
 The Windows `.exe` is not produced on Linux; run the Windows command on a
 Windows machine or dispatch the GitHub Actions workflow. Local Linux builds
-are written to `dist/release/HoomansLLM-<version>-x86_64.AppImage`, while the
-Windows runner writes `dist/release/HoomansLLM-<version>-x86_64.exe`.
+are written to `dist/release/PBrainZ-<version>-x86_64.AppImage`, while the
+Windows runner writes `dist/release/PBrainZ-<version>-x86_64.exe`.
 
 ## Configuration
 
@@ -174,7 +172,7 @@ important controls are:
 - request timeout, bridge polling, and Project Hoomans bridge state.
 - light or dark control-panel theme.
 
-The optional `HOOMANSLLM_DB` process environment variable changes the SQLite
+The optional `PBRAINZ_DB` process environment variable changes the SQLite
 database path. `OPEN_GUI=false` runs the API without opening the native panel.
 
 For bridge debugging, print the persisted recent activity without starting the
@@ -200,14 +198,14 @@ and selected model, so changing one does not change the others.
 `OPENAI_BASE_URL` remains available for OpenAI Cloud during environment-based
 setup.
 
-For a request using model `default` or `auto`, HoomansLLM prefers
+For a request using model `default` or `auto`, P BrainZ prefers
 `DEFAULT_PROVIDER` when it is configured and falls back to the first enabled
 provider with credentials or a configured local endpoint. This lets a
 Gemini-only or local-only setup work without changing the in-game Project
 Hoomans integration.
 
 By default, chat requests are accepted only while the PsychopatzCore bridge is
-`READY`. HoomansLLM reads the bridge's validated runtime marker from the shared
+`READY`. P BrainZ reads the bridge's validated runtime marker from the shared
 `PsychopatzBridge/state` directory. When the bridge is ready, the server polls
 Project Hoomans' narrow NPC-chat capability, calls the configured provider, and
 delivers the reply back through the game tunnel. Set `BRIDGE_REQUIRED=false`
@@ -215,7 +213,7 @@ only for standalone provider testing.
 
 The control-panel bridge switch updates the same
 `~/Zomboid/Lua/PsychopatzCore_Bridge.txt` setting used by the game and controls
-HoomansLLM's polling worker together. Project Hoomans applies that setting
+P BrainZ's polling worker together. Project Hoomans applies that setting
 while the game is running, so the profiler is not required for this workflow.
 
 Keep the default localhost bind unless you have separately secured the
@@ -255,7 +253,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
-The `provider` field is a HoomansLLM extension. For convenience, a model can
+The `provider` field is a P BrainZ extension. For convenience, a model can
 also be prefixed with `openai/`, `openai:`, `ollama/`, `ollama:`,
 `lmstudio/`, `lmstudio:`, `custom/`, `custom:`, `gemini/`, or
 `gemini:`; the prefix selects the provider and is removed before the upstream
@@ -270,25 +268,25 @@ Start this server before opening a Project Hoomans conversation. Enable the
 Project Hoomans local bridge in the game's bridge configuration, then open an
 NPC conversation. A `TYPE TO TALK` input appears beneath the response choices.
 Submit a message there; the game sends the current NPC conversation history to
-the bridge, HoomansLLM calls the selected provider, and the NPC reply is added
+the bridge, P BrainZ calls the selected provider, and the NPC reply is added
 to the conversation log.
 
 The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
 and compact `speechStarted`/`speechFinished`/`speechFallback` events in the
 `projecthoomans.llm` namespace. Requests are tied to the current runtime ID
 and the active NPC conversation. Provider keys remain in
-HoomansLLM's local SQLite database and never enter the game tunnel.
+P BrainZ's local SQLite database and never enter the game tunnel.
 
 The structured game request also carries a compact canonical character card,
 relationship snapshot, notable current state, recent dialogue, and the
-semantic tools exposed for that NPC. HoomansLLM owns prompt assembly and
+semantic tools exposed for that NPC. P BrainZ owns prompt assembly and
 conversation memory; Project Hoomans remains authoritative for gameplay. Any
 returned order intent is sent back as an untrusted semantic tool call and is
 validated by the game's existing command registry before it can be submitted.
 
 ## NPC memory and context
 
-NPC memory is separate from the settings database. HoomansLLM creates one
+NPC memory is separate from the settings database. P BrainZ creates one
 SQLite database per save/world under the configured `memory_root` (by default,
 the `memory/` directory beside the settings database). The filename contains a
 short hash of the stable Project Zomboid save identifier, while the full
@@ -319,7 +317,7 @@ schema, multiplayer boundary, failure model, and extension points.
 
 ## Adding a provider
 
-Implement `LLMProvider` in `src/hoomans_llm/providers/`, normalize the provider
+Implement `LLMProvider` in `src/pbrainz/providers/`, normalize the provider
 response into `CompletionResult` and `StreamEvent`, then register the factory
 in `ProviderRegistry`. The HTTP routes and API models do not need to change.
 

@@ -1,7 +1,7 @@
 import pytest
 
-from hoomans_llm.context_builder import ContextBuilder, ContextInput
-from hoomans_llm.memory import (
+from pbrainz.context_builder import ContextBuilder, ContextInput
+from pbrainz.memory import (
     ConversationTurn,
     MemoryRecord,
     MemoryScope,

@@ -1,4 +1,4 @@
-name: Build HoomansLLM release artifacts
+name: Build P BrainZ release artifacts
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
         run: python scripts/build_release.py --target exe --version "${{ github.ref_name }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: HoomansLLM-windows
+          name: PBrainZ-windows
           path: dist/release/*.exe
 
   linux:
@@ -41,7 +41,7 @@ jobs:
         run: python scripts/build_release.py --target appimage --version "${{ github.ref_name }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: HoomansLLM-linux
+          name: PBrainZ-linux
           path: dist/release/*.AppImage
 
   publish:

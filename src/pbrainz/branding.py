@@ -1,0 +1,10 @@
+"""Canonical product branding and portable-runtime names."""
+
+PRODUCT_NAME = "P BrainZ"
+PRODUCT_BINARY_NAME = "PBrainZ"
+PRODUCT_VERSION = "0.1.0"
+PROJECT_NAME = "p-brainz"
+DATABASE_NAME = "pbrainz.db"
+DATABASE_ENV = "PBRAINZ_DB"
+PORTABLE_ROOT_ENV = "PBRAINZ_PORTABLE_ROOT"
+LOGGER_NAME = "pbrainz"

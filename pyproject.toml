@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hoomans-llm"
+name = "p-brainz"
 version = "0.1.0"
-description = "A provider-agnostic local LLM gateway for Project Hoomans NPCs."
+description = "A modular local AI gateway for Project Zomboid mods."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,14 +25,15 @@ dev = [
     "ruff>=0.9,<1.0",
 ]
 build = [
+    "cairosvg>=2.7,<3.0",
     "pyinstaller>=6.0,<7.0",
 ]
 
 [project.scripts]
-hoomans-llm = "hoomans_llm.__main__:main"
+p-brainz = "pbrainz.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hoomans_llm"]
+packages = ["src/pbrainz"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

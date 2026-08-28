@@ -12,16 +12,16 @@ if [[ ! -x "${VENV_PYTHON}" ]]; then
         exit 1
     fi
 
-    echo "First run: creating the private HoomansLLM environment..."
+    echo "First run: creating the private P BrainZ environment..."
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 
-if ! "${VENV_PYTHON}" -c 'import fastapi, google.genai, openai, pydantic_settings, uvicorn, hoomans_llm' >/dev/null 2>&1; then
-    echo "First run: installing HoomansLLM dependencies..."
+if ! "${VENV_PYTHON}" -c 'import fastapi, google.genai, openai, pydantic_settings, uvicorn, pbrainz' >/dev/null 2>&1; then
+    echo "First run: installing P BrainZ dependencies..."
     "${VENV_PYTHON}" -m ensurepip --upgrade >/dev/null 2>&1 || true
     "${VENV_PYTHON}" -m pip install --upgrade pip
     "${VENV_PYTHON}" -m pip install "${PROJECT_ROOT}"
 fi
 
 cd "${PROJECT_ROOT}"
-exec "${VENV_PYTHON}" -m hoomans_llm "$@"
+exec "${VENV_PYTHON}" -m pbrainz "$@"

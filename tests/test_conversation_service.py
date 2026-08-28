@@ -1,9 +1,9 @@
 import pytest
 
-from hoomans_llm.config import Settings
-from hoomans_llm.conversation_service import ConversationRequest, ConversationService
-from hoomans_llm.memory import MemoryScope
-from hoomans_llm.providers.base import CompletionResult
+from pbrainz.config import Settings
+from pbrainz.conversation_service import ConversationRequest, ConversationService
+from pbrainz.memory import MemoryScope
+from pbrainz.providers.base import CompletionResult
 
 
 class FakeProviders:

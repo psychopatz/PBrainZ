@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGING_ROOT = PROJECT_ROOT / "packaging"
 BUILD_ROOT = PROJECT_ROOT / "build" / "release"
 DEFAULT_OUTPUT = PROJECT_ROOT / "dist" / "release"
+PRODUCT_BINARY_NAME = "PBrainZ"
 APPIMAGE_TOOL_URL = (
     "https://github.com/AppImage/appimagetool/releases/download/continuous/"
     "appimagetool-{architecture}.AppImage"
@@ -44,13 +45,14 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "data").mkdir(exist_ok=True)
 
-    bundle = _build_pyinstaller(target, staging)
+    icon_assets = _prepare_icon_assets(staging)
+    bundle = _build_pyinstaller(target, staging, icon_assets)
     if target == "exe":
-        artifact = output_dir / f"HoomansLLM-{version}-{_platform_tag()}.exe"
+        artifact = output_dir / f"{PRODUCT_BINARY_NAME}-{version}-{_platform_tag()}.exe"
         shutil.copy2(bundle, artifact)
     else:
         artifact = _build_appimage(
-            bundle, staging, output_dir, version, configured_appimagetool
+            bundle, staging, output_dir, version, configured_appimagetool, icon_assets
         )
     print(f"Release artifact: {artifact}")
     return 0
@@ -104,7 +106,41 @@ def _release_version(requested: str | None) -> str:
     )
 
 
-def _build_pyinstaller(target: str, staging: Path) -> Path:
+def _prepare_icon_assets(staging: Path) -> Path:
+    """Render all PNG variants from the canonical SVG before freezing the app."""
+
+    icon_assets = staging / "icon-assets"
+    source = PACKAGING_ROOT / "pbrainz.svg"
+    _run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "render_icon.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(icon_assets / "pbrainz.png"),
+            "--size",
+            "256",
+        ]
+    )
+    _run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "render_icon.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(icon_assets / "pbrainz-mark.png"),
+            "--size",
+            "512",
+            "--transparent",
+        ]
+    )
+    shutil.copy2(source, icon_assets / "pbrainz.svg")
+    return icon_assets
+
+
+def _build_pyinstaller(target: str, staging: Path, icon_assets: Path) -> Path:
     _run([sys.executable, "-m", "PyInstaller", "--version"])
     dist_path = staging / "pyinstaller-dist"
     work_path = staging / "pyinstaller-work"
@@ -115,14 +151,20 @@ def _build_pyinstaller(target: str, staging: Path) -> Path:
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        # Keep stdout/stderr available so ``HoomansLLM --activity`` and the
+        # Keep stdout/stderr available so ``PBrainZ --activity`` and the
         # bridge send/receive diagnostics work from a terminal in a frozen
         # release build. The GUI still launches normally from the desktop.
         "--console",
         "--name",
-        "HoomansLLM",
+        PRODUCT_BINARY_NAME,
         "--paths",
         str(PROJECT_ROOT / "src"),
+        "--add-data",
+        f"{icon_assets / 'pbrainz.png'}{os.pathsep}pbrainz/gui/assets",
+        "--add-data",
+        f"{icon_assets / 'pbrainz-mark.png'}{os.pathsep}pbrainz/gui/assets",
+        "--add-data",
+        f"{icon_assets / 'pbrainz.svg'}{os.pathsep}pbrainz/gui/assets",
         "--distpath",
         str(dist_path),
         "--workpath",
@@ -148,9 +190,9 @@ def _build_pyinstaller(target: str, staging: Path) -> Path:
     command.append(str(PACKAGING_ROOT / "launcher.py"))
     _run(command)
     if target == "exe":
-        executable = dist_path / "HoomansLLM.exe"
+        executable = dist_path / f"{PRODUCT_BINARY_NAME}.exe"
     else:
-        executable = dist_path / "HoomansLLM" / "HoomansLLM"
+        executable = dist_path / PRODUCT_BINARY_NAME / PRODUCT_BINARY_NAME
     if not executable.exists():
         raise SystemExit(f"PyInstaller completed but expected output was not found: {executable}")
     return executable
@@ -162,32 +204,46 @@ def _build_appimage(
     output_dir: Path,
     version: str,
     configured_tool: Path | None,
+    icon_assets: Path,
 ) -> Path:
     app_dir = staging / "AppDir"
-    payload = app_dir / "usr" / "lib" / "HoomansLLM"
+    payload = app_dir / "usr" / "lib" / PRODUCT_BINARY_NAME
     payload.parent.mkdir(parents=True)
     shutil.copytree(bundle.parent, payload)
-    shutil.copy2(PACKAGING_ROOT / "hoomansllm.desktop", app_dir / "hoomansllm.desktop")
-    shutil.copy2(PACKAGING_ROOT / "hoomansllm.svg", app_dir / "hoomansllm.svg")
+    shutil.copy2(PACKAGING_ROOT / "pbrainz.desktop", app_dir / "pbrainz.desktop")
+    shutil.copy2(icon_assets / "pbrainz.svg", app_dir / "pbrainz.svg")
+    shutil.copy2(icon_assets / "pbrainz.png", app_dir / "pbrainz.png")
     icon_dir = app_dir / "usr" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     icon_dir.mkdir(parents=True)
-    shutil.copy2(PACKAGING_ROOT / "hoomansllm.svg", icon_dir / "hoomansllm.svg")
+    shutil.copy2(icon_assets / "pbrainz.svg", icon_dir / "pbrainz.svg")
+    for size in (128, 256):
+        png_icon_dir = (
+            app_dir
+            / "usr"
+            / "share"
+            / "icons"
+            / "hicolor"
+            / f"{size}x{size}"
+            / "apps"
+        )
+        png_icon_dir.mkdir(parents=True)
+        shutil.copy2(icon_assets / "pbrainz.png", png_icon_dir / "pbrainz.png")
     app_run = app_dir / "AppRun"
     app_run.write_text(
         '#!/bin/sh\n'
         'HERE="$(dirname "$(readlink -f "$0")")"\n'
         'if [ -n "${APPIMAGE:-}" ]; then\n'
-        '    export HOOMANSLLM_PORTABLE_ROOT="$(dirname "$(readlink -f "$APPIMAGE")")"\n'
+        '    export PBRAINZ_PORTABLE_ROOT="$(dirname "$(readlink -f "$APPIMAGE")")"\n'
         'else\n'
-        '    export HOOMANSLLM_PORTABLE_ROOT="$HERE"\n'
+        '    export PBRAINZ_PORTABLE_ROOT="$HERE"\n'
         'fi\n'
-        'exec "$HERE/usr/lib/HoomansLLM/HoomansLLM" "$@"\n',
+        'exec "$HERE/usr/lib/PBrainZ/PBrainZ" "$@"\n',
         encoding="utf-8",
     )
     app_run.chmod(app_run.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     tool = _find_appimagetool(configured_tool, staging)
-    artifact = output_dir / f"HoomansLLM-{version}-{_platform_tag()}.AppImage"
+    artifact = output_dir / f"{PRODUCT_BINARY_NAME}-{version}-{_platform_tag()}.AppImage"
     temporary_artifact = output_dir / f".{artifact.name}.tmp"
     temporary_artifact.unlink(missing_ok=True)
     environment = os.environ.copy()

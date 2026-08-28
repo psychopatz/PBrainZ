@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from hoomans_llm.bridge import BridgeRequest, BridgeRuntimeMonitor, BridgeState
-from hoomans_llm.bridge.handler import complete_and_deliver, semantic_tool_calls_for
-from hoomans_llm.bridge.pump import run_bridge_pump
-from hoomans_llm.bridge.transport import FileBridgeTransport
-from hoomans_llm.config import Settings
-from hoomans_llm.conversation_runtime import Utterance
-from hoomans_llm.providers.base import CompletionResult
+from pbrainz.bridge import BridgeRequest, BridgeRuntimeMonitor, BridgeState
+from pbrainz.bridge.handler import complete_and_deliver, semantic_tool_calls_for
+from pbrainz.bridge.pump import run_bridge_pump
+from pbrainz.bridge.transport import FileBridgeTransport
+from pbrainz.config import Settings
+from pbrainz.conversation_runtime import Utterance
+from pbrainz.providers.base import CompletionResult
 
 
 def test_file_transport_matches_psychopatzcore_slot_protocol(tmp_path) -> None:
@@ -177,8 +177,8 @@ class DeliveryClient:
 
 @pytest.mark.asyncio
 async def test_structured_bridge_delivers_authorized_semantic_tool_calls(tmp_path) -> None:
-    from hoomans_llm.bridge import BridgeState
-    from hoomans_llm.conversation_service import ConversationService
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
 
     providers = StructuredProviders()
     settings = Settings(

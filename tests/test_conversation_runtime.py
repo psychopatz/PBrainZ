@@ -1,6 +1,6 @@
 import pytest
 
-from hoomans_llm.conversation_runtime import (
+from pbrainz.conversation_runtime import (
     ConversationRuntime,
     GossipScene,
     SpeakerCandidate,

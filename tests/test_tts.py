@@ -1,13 +1,15 @@
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hoomans_llm.config import Settings
-from hoomans_llm.conversation_runtime import Utterance, VoiceBinding
-from hoomans_llm.tts import (
+from pbrainz.config import Settings
+from pbrainz.conversation_runtime import Utterance, VoiceBinding
+from pbrainz.tts import (
+    DEFAULT_TTS_PRESETS,
     PiperModelCache,
     SpeechScheduler,
     SynthesizedAudio,
@@ -111,7 +113,7 @@ def test_remote_catalog_distinguishes_missing_and_installed_voice_files(
     settings = _settings(tmp_path)
     catalog = VoiceCatalog(settings)
     monkeypatch.setattr(
-        "hoomans_llm.tts.urlopen",
+        "pbrainz.tts.catalog.urlopen",
         lambda *_args, **_kwargs: _CatalogResponse(json.dumps(catalog_json).encode()),
     )
 
@@ -131,6 +133,60 @@ def test_remote_catalog_distinguishes_missing_and_installed_voice_files(
     (root / f"{model_id}.onnx.json").write_bytes(b"config")
     catalog.refresh()
     assert catalog.get(model_id).installed is True
+
+
+def test_installed_catalog_filter_uses_piper_display_language(tmp_path) -> None:
+    model_id = "en_US-amy-medium"
+    settings = _settings(tmp_path)
+    catalog = VoiceCatalog(settings)
+    catalog.remote_models = catalog._normalize_remote_catalog(
+        _remote_catalog(model_id, b"model", b"config")
+    )
+    root = Path(settings.tts_model_root)
+    root.mkdir(parents=True)
+    (root / f"{model_id}.onnx").write_bytes(b"model")
+    (root / f"{model_id}.onnx.json").write_text(
+        json.dumps(
+            {
+                "language": {
+                    "code": "en_US",
+                    "family": "en",
+                    "name_english": "English",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog.refresh()
+
+    assert catalog.get(model_id).language == "English"
+    assert [model.id for model in catalog.filter(language="English", installed_only=True)] == [
+        model_id
+    ]
+
+
+def test_catalog_uninstall_removes_model_and_descriptor(tmp_path) -> None:
+    model_id = "en_US-amy-medium"
+    settings = _settings(tmp_path)
+    catalog = VoiceCatalog(settings)
+    catalog.remote_models = catalog._normalize_remote_catalog(
+        _remote_catalog(model_id, b"model", b"config")
+    )
+    root = Path(settings.tts_model_root)
+    root.mkdir(parents=True)
+    model_path = root / f"{model_id}.onnx"
+    config_path = root / f"{model_id}.onnx.json"
+    model_path.write_bytes(b"model")
+    config_path.write_text(json.dumps({"language": {"code": "en_US"}}), encoding="utf-8")
+    catalog.refresh()
+
+    removed = catalog.uninstall(model_id)
+
+    assert removed.installed is False
+    assert not model_path.exists()
+    assert not config_path.exists()
+    assert catalog.filter(installed_only=True) == []
 
 
 def test_remote_catalog_marks_multi_speaker_voice_as_mixed(tmp_path) -> None:
@@ -155,7 +211,7 @@ def test_catalog_downloads_a_sample_without_installing_the_voice(monkeypatch, tm
     )
     catalog.refresh()
     monkeypatch.setattr(
-        "hoomans_llm.tts.urlopen",
+        "pbrainz.tts.catalog.urlopen",
         lambda *_args, **_kwargs: _CatalogResponse(b"sample audio"),
     )
 
@@ -183,7 +239,7 @@ def test_catalog_install_downloads_and_verifies_both_piper_files(monkeypatch, tm
             model_bytes if url.endswith(".onnx?download=true") else config_bytes
         )
 
-    monkeypatch.setattr("hoomans_llm.tts.urlopen", fake_urlopen)
+    monkeypatch.setattr("pbrainz.tts.catalog.urlopen", fake_urlopen)
     progress: list[tuple[str, int, int]] = []
     installed = catalog.install(model_id, progress=lambda *update: progress.append(update))
 
@@ -215,7 +271,7 @@ async def test_voice_install_jobs_deduplicate_and_report_completion(monkeypatch,
             model_bytes if url.endswith(".onnx?download=true") else config_bytes
         )
 
-    monkeypatch.setattr("hoomans_llm.tts.urlopen", fake_urlopen)
+    monkeypatch.setattr("pbrainz.tts.catalog.urlopen", fake_urlopen)
     first = service.start_voice_install(model_id)
     duplicate = service.start_voice_install(model_id)
 
@@ -237,7 +293,7 @@ def test_catalog_install_rejects_checksum_mismatch(monkeypatch, tmp_path) -> Non
     )
     catalog.refresh()
     monkeypatch.setattr(
-        "hoomans_llm.tts.urlopen",
+        "pbrainz.tts.catalog.urlopen",
         lambda *_args, **_kwargs: _CatalogResponse(b"tampered model"),
     )
 
@@ -263,6 +319,80 @@ def test_presets_are_restricted_to_compact_voice_slots(tmp_path) -> None:
     assert "voice-secret" not in settings.tts_voice_presets_json
 
 
+def test_preset_repository_fills_empty_slots_without_overwriting_custom_choices(tmp_path) -> None:
+    repository = VoicePresetRepository(_settings(tmp_path))
+    repository.replace([{"slot": "VoiceMale:0", "voice_model_id": "my-custom-voice"}])
+
+    missing_slots = repository.ensure_defaults()
+
+    assert missing_slots == tuple(
+        slot for slot, _model_id in DEFAULT_TTS_PRESETS if slot != "VoiceMale:0"
+    )
+    presets = repository.all()
+    assert presets["VoiceMale:0"].voice_model_id == "my-custom-voice"
+    assert all(
+        presets[slot].voice_model_id == model_id
+        for slot, model_id in DEFAULT_TTS_PRESETS
+        if slot != "VoiceMale:0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_voice_setup_installs_selected_defaults_in_order(
+    monkeypatch, tmp_path
+) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    service.presets.ensure_defaults()
+    service.catalog.models = {
+        model_id: VoiceModel(
+            model_id,
+            model_id,
+            language="English",
+            gender="female" if slot.startswith("VoiceFemale") else "male",
+            quality="medium",
+            installed=False,
+            model_url="https://example.invalid/model.onnx",
+            config_url="https://example.invalid/model.onnx.json",
+        )
+        for slot, model_id in DEFAULT_TTS_PRESETS
+    }
+    monkeypatch.setattr(service, "refresh_catalog", _async_noop)
+    installed: list[str] = []
+
+    def fake_start_voice_install(model_id: str) -> dict[str, object]:
+        installed.append(model_id)
+        model = service.catalog.models[model_id]
+        service.catalog.models[model_id] = replace(model, installed=True)
+        return {"job_id": "", "state": "complete"}
+
+    monkeypatch.setattr(service, "start_voice_install", fake_start_voice_install)
+
+    await service._install_default_voices()
+
+    assert installed == [model_id for _slot, model_id in DEFAULT_TTS_PRESETS]
+    assert service._default_setup_complete is True
+
+
+async def _async_noop(*_args, **_kwargs) -> bool:
+    return True
+
+
+def test_preset_repository_removes_all_slots_for_uninstalled_model(tmp_path) -> None:
+    repository = VoicePresetRepository(_settings(tmp_path))
+    repository.replace(
+        [
+            {"slot": "VoiceFemale:0", "voice_model_id": "voice-a"},
+            {"slot": "VoiceMale:0", "voice_model_id": "voice-a"},
+            {"slot": "VoiceMale:1", "voice_model_id": "voice-b"},
+        ]
+    )
+
+    removed = repository.remove_model("voice-a")
+
+    assert removed == ("VoiceFemale:0", "VoiceMale:0")
+    assert set(repository.all()) == {"VoiceMale:1"}
+
+
 def test_model_cache_is_bounded_lru() -> None:
     cache = PiperModelCache(2)
     cache.get_or_load("a", lambda: "A")
@@ -273,6 +403,41 @@ def test_model_cache_is_bounded_lru() -> None:
     assert cache.loaded_model_ids == ("a", "c")
     assert cache.eviction_count == 1
     assert cache.load_count == 3
+    assert cache.evict("a") is True
+    assert cache.loaded_model_ids == ("c",)
+    assert cache.evict("missing") is False
+
+
+@pytest.mark.asyncio
+async def test_uninstall_voice_clears_cache_and_preset_references(tmp_path) -> None:
+    model_id = "en_US-amy-medium"
+    service = TTSService(_settings(tmp_path, tts_enabled=False))
+    service.catalog.remote_models = service.catalog._normalize_remote_catalog(
+        _remote_catalog(model_id, b"model", b"config")
+    )
+    root = Path(service.settings.tts_model_root)
+    root.mkdir(parents=True)
+    (root / f"{model_id}.onnx").write_bytes(b"model")
+    (root / f"{model_id}.onnx.json").write_text(
+        json.dumps({"language": {"code": "en_US"}}), encoding="utf-8"
+    )
+    service.catalog.refresh()
+    service.presets.replace(
+        [
+            {"slot": "VoiceFemale:0", "voice_model_id": model_id},
+            {"slot": "VoiceMale:0", "voice_model_id": "other-model"},
+        ]
+    )
+    service.provider.cache.get_or_load(model_id, lambda: object())
+
+    result = await service.uninstall_voice(model_id)
+
+    assert result["cleared_preset_slots"] == ["VoiceFemale:0"]
+    assert service.provider.cache.loaded_model_ids == ()
+    assert "VoiceFemale:0" not in service.presets.all()
+    assert service.presets.all()["VoiceMale:0"].voice_model_id == "other-model"
+    assert not (root / f"{model_id}.onnx").exists()
+    await service.stop()
 
 
 @pytest.mark.asyncio
@@ -306,6 +471,65 @@ async def test_installed_voice_test_plays_when_tts_is_disabled(tmp_path) -> None
         assert await service.test_voice("VoiceMale:0", "manual test")
         await asyncio.wait_for(_wait_until(lambda: len(output.processes) == 1), timeout=2)
         assert provider.calls == ["manual test"]
+        output.processes[0].release()
+        await asyncio.wait_for(
+            _wait_until(lambda: not (tmp_path / "test-audio-1.wav").exists()), timeout=2
+        )
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_enabled_tts_autoplays_generated_text_with_first_installed_preset(tmp_path) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    model_id = "en_US-amy-medium"
+    root = Path(service.settings.tts_model_root)
+    root.mkdir(parents=True)
+    (root / f"{model_id}.onnx").write_bytes(b"model")
+    (root / f"{model_id}.onnx.json").write_text(
+        json.dumps({"language": {"code": "en_US", "name_english": "English"}}),
+        encoding="utf-8",
+    )
+    service.catalog.refresh()
+    service.presets.replace([{"slot": "VoiceFemale:0", "voice_model_id": model_id}])
+    provider = _FakeProvider(tmp_path)
+    output = _FakeOutput()
+    service.provider = provider
+    service.output = output
+
+    try:
+        assert await service.speak_text("generated response", source="control-panel")
+        await asyncio.wait_for(_wait_until(lambda: len(output.processes) == 1), timeout=2)
+        assert provider.calls == ["generated response"]
+        output.processes[0].release()
+        await asyncio.wait_for(
+            _wait_until(lambda: not (tmp_path / "test-audio-1.wav").exists()), timeout=2
+        )
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_enabled_tts_uses_an_installed_voice_before_presets_are_configured(tmp_path) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    model_id = "en_US-amy-medium"
+    root = Path(service.settings.tts_model_root)
+    root.mkdir(parents=True)
+    (root / f"{model_id}.onnx").write_bytes(b"model")
+    (root / f"{model_id}.onnx.json").write_text(
+        json.dumps({"language": {"code": "en_US", "name_english": "English"}}),
+        encoding="utf-8",
+    )
+    service.catalog.refresh()
+    provider = _FakeProvider(tmp_path)
+    output = _FakeOutput()
+    service.provider = provider
+    service.output = output
+
+    try:
+        assert await service.speak_text("fallback response", source="control-panel")
+        await asyncio.wait_for(_wait_until(lambda: len(output.processes) == 1), timeout=2)
+        assert provider.calls == ["fallback response"]
         output.processes[0].release()
         await asyncio.wait_for(
             _wait_until(lambda: not (tmp_path / "test-audio-1.wav").exists()), timeout=2

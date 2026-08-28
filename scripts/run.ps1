@@ -10,30 +10,30 @@ if (!(Test-Path -LiteralPath $VenvPython)) {
         throw "Python 3.11 or newer is required. Install Python, then run this script again."
     }
 
-    Write-Host "First run: creating the private HoomansLLM environment..."
+    Write-Host "First run: creating the private P BrainZ environment..."
     & $PythonBin -m venv $VenvDir
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not create the HoomansLLM virtual environment."
+        throw "Could not create the P BrainZ virtual environment."
     }
 }
 
-$Probe = "import fastapi, google.genai, openai, pydantic_settings, uvicorn, hoomans_llm"
+$Probe = "import fastapi, google.genai, openai, pydantic_settings, uvicorn, pbrainz"
 $null = & $VenvPython -c $Probe 2>$null
 $NeedsDependencies = $LASTEXITCODE -ne 0
 
 if ($NeedsDependencies) {
-    Write-Host "First run: installing HoomansLLM dependencies..."
+    Write-Host "First run: installing P BrainZ dependencies..."
     & $VenvPython -m ensurepip --upgrade *> $null
     & $VenvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not prepare pip inside the HoomansLLM virtual environment."
+        throw "Could not prepare pip inside the P BrainZ virtual environment."
     }
     & $VenvPython -m pip install $ProjectRoot
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not install HoomansLLM dependencies."
+        throw "Could not install P BrainZ dependencies."
     }
 }
 
 Set-Location -LiteralPath $ProjectRoot
-& $VenvPython -m hoomans_llm @args
+& $VenvPython -m pbrainz @args
 exit $LASTEXITCODE

@@ -1,6 +1,6 @@
 import json
 
-from hoomans_llm.bridge import BridgeRuntimeMonitor
+from pbrainz.bridge import BridgeRuntimeMonitor
 
 
 def test_bridge_runtime_requires_matching_ready_marker(tmp_path) -> None:

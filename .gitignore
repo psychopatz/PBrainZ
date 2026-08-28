@@ -3,8 +3,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-hoomansllm.db
-hoomansllm.db-*
+# Runtime data can contain provider credentials and conversation history.
+data/
+*.db
+*.db-*
 dist/
 build/
 .architecture-refactor/
