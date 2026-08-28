@@ -67,6 +67,7 @@ class OpenAICompatibleProvider(LLMProvider):
             finish_reason=self._finish_reason(choice.finish_reason if choice else None),
             usage=self._usage(getattr(response, "usage", None)),
             tool_calls=self._tool_calls(message),
+            reasoning=self._reasoning(message),
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -190,6 +191,20 @@ class OpenAICompatibleProvider(LLMProvider):
                 }
             )
         return normalized or None
+
+    @staticmethod
+    def _reasoning(message: Any) -> str | None:
+        """Read public reasoning fields used by compatible APIs, if present."""
+        if message is None:
+            return None
+        for field_name in ("reasoning_content", "reasoning", "analysis", "thinking"):
+            value = getattr(message, field_name, None)
+            if value is None or value == "":
+                continue
+            if isinstance(value, str):
+                return value[:12000]
+            return str(value)[:12000]
+        return None
 
     @staticmethod
     def _finish_reason(reason: Any) -> str:

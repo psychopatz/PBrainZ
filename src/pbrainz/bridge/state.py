@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pbrainz.paths import bridge_root_for
 
 from .protocol import PROTOCOL_VERSION
 
@@ -25,6 +26,9 @@ class BridgeState:
     lifecycle: str | None = None
     authority: str | None = None
     transport: str | None = None
+    tool_catalog_id: str | None = None
+    tool_catalog_version: int | None = None
+    packet_channels: tuple[dict[str, Any], ...] = ()
     message: str = "bridge runtime unavailable"
 
     def as_dict(self) -> dict[str, Any]:
@@ -37,6 +41,9 @@ class BridgeState:
             "lifecycle": self.lifecycle,
             "authority": self.authority,
             "transport": self.transport,
+            "tool_catalog_id": self.tool_catalog_id,
+            "tool_catalog_version": self.tool_catalog_version,
+            "packet_channels": list(self.packet_channels),
             "message": self.message,
         }
 
@@ -44,13 +51,23 @@ class BridgeState:
 class BridgeRuntimeMonitor:
     """Read the same cross-platform state directory used by PsychopatzCore."""
 
-    def __init__(self, root: str | Path | None = None) -> None:
-        configured_root = root or os.getenv("ZOMBOID_BRIDGE_ROOT")
-        self.root = (
-            Path(configured_root)
-            if configured_root
-            else Path.home() / "Zomboid" / "Lua" / "PsychopatzBridge"
-        )
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        zomboid_path: str | Path | None = None,
+    ) -> None:
+        self.set_root(root, zomboid_path=zomboid_path)
+
+    def set_root(
+        self,
+        root: str | Path | None = None,
+        *,
+        zomboid_path: str | Path | None = None,
+    ) -> None:
+        """Point monitoring at a new bridge root without touching the filesystem."""
+
+        self.root = bridge_root_for(zomboid_path, root)
         self.state_dir = self.root / "state"
 
     def read(self) -> BridgeState:
@@ -81,6 +98,12 @@ class BridgeRuntimeMonitor:
         enabled = value.get("enabled") is True
         lifecycle = str(value.get("lifecycle") or "")
         ready = enabled and lifecycle == "READY"
+        tool_catalog_id = value.get("tool_catalog_id")
+        packet_channels = value.get("packet_channels")
+        normalized_channels = tuple(
+            dict(row) for row in packet_channels[:32]
+            if isinstance(row, dict)
+        ) if isinstance(packet_channels, list) else ()
         return BridgeState(
             available=True,
             enabled=enabled,
@@ -90,6 +113,15 @@ class BridgeRuntimeMonitor:
             lifecycle=lifecycle or None,
             authority=str(value.get("authority") or "") or None,
             transport=str(value.get("transport") or "") or None,
+            tool_catalog_id=(
+                tool_catalog_id if isinstance(tool_catalog_id, str) and tool_catalog_id else None
+            ),
+            tool_catalog_version=(
+                value["tool_catalog_version"]
+                if isinstance(value.get("tool_catalog_version"), int)
+                and not isinstance(value.get("tool_catalog_version"), bool)
+                else None
+            ),
+            packet_channels=normalized_channels,
             message="bridge ready" if ready else f"bridge lifecycle is {lifecycle or 'unknown'}",
         )
-

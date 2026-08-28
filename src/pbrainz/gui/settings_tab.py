@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from pbrainz.branding import PRODUCT_NAME
+from pbrainz.paths import default_zomboid_path
 
 from .state import PanelState
 
@@ -67,8 +69,27 @@ class SettingsTab:
         ttk.Entry(runtime, textvariable=self.state.poll_interval, width=16).grid(
             row=1, column=1, sticky="ew", pady=4
         )
-        ttk.Label(runtime, text="Control-panel theme").grid(
+        ttk.Label(runtime, text="Project Zomboid data directory").grid(
             row=2, column=0, sticky="w", pady=(16, 4)
+        )
+        path_frame = ttk.Frame(runtime)
+        path_frame.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(16, 4))
+        path_frame.columnconfigure(0, weight=1)
+        ttk.Entry(path_frame, textvariable=self.state.zomboid_path).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(path_frame, text="Browse…", command=self._browse_zomboid_path).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+        ttk.Button(path_frame, text="Auto-detect", command=self._auto_detect_zomboid_path).grid(
+            row=0, column=2, padx=(8, 0)
+        )
+        ttk.Label(
+            runtime,
+            text="Folder containing console.txt",
+        ).grid(row=3, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(runtime, text="Control-panel theme").grid(
+            row=4, column=0, sticky="w", pady=(16, 4)
         )
         self._theme_box = ttk.Combobox(
             runtime,
@@ -77,10 +98,10 @@ class SettingsTab:
             state="readonly",
             width=16,
         )
-        self._theme_box.grid(row=2, column=1, sticky="ew", pady=(16, 4))
+        self._theme_box.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(16, 4))
         self._theme_box.bind("<<ComboboxSelected>>", self._on_theme_changed)
         actions = ttk.Frame(runtime)
-        actions.grid(row=3, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(16, 0))
         ttk.Button(actions, text="Refresh", command=refresh).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Save settings", command=self._save).pack(side="left")
 
@@ -111,6 +132,18 @@ class SettingsTab:
 
     def _on_theme_changed(self, _event: object | None = None) -> None:
         self._theme_changed_callback(self.state.theme.get())
+
+    def _browse_zomboid_path(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self.parent.winfo_toplevel(),
+            initialdir=self.state.zomboid_path.get() or str(Path.home()),
+            title="Choose Project Zomboid data directory",
+        )
+        if selected:
+            self.state.zomboid_path.set(selected)
+
+    def _auto_detect_zomboid_path(self) -> None:
+        self.state.zomboid_path.set(str(default_zomboid_path()))
 
     def _tts_variables(self) -> tuple[tk.StringVar, ...]:
         return (
@@ -173,6 +206,7 @@ class SettingsTab:
             {
                 "request_timeout": timeout,
                 "bridge_poll_interval": poll_interval,
+                "zomboid_path": self.state.zomboid_path.get().strip() or None,
                 "ui_theme": self.state.theme.get(),
                 **tts_values,
             }

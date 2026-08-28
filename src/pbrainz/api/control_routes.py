@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import uuid
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 
 from pbrainz.api.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    MemoryDeleteRequest,
+    MockChatRequest,
+    MockChatSeedRequest,
     UIBridgeRequest,
+    UIDebugTraceSettingsRequest,
     UILogResponse,
     UIModelRefreshRequest,
     UISettingsRequest,
@@ -22,7 +28,24 @@ from pbrainz.api.models import (
     UITTSVoiceUninstallRequest,
 )
 from pbrainz.config import OPENAI_COMPATIBLE_PROVIDERS
-from pbrainz.database import DEFAULT_ACTIVITY_LIMIT, SettingsDatabase
+from pbrainz.conversation_service import ConversationRequest
+from pbrainz.database import (
+    DEFAULT_ACTIVITY_LIMIT,
+    DEFAULT_TRACE_LIMIT,
+    SettingsDatabase,
+)
+from pbrainz.memory import (
+    DaySynopsis,
+    MemoryEpisode,
+    MemoryRecord,
+    MemoryScope,
+    MemoryType,
+    MemoryVisibility,
+    SQLiteMemoryStore,
+    StructuredFact,
+    memory_root_for_settings,
+)
+from pbrainz.paths import normalize_zomboid_path
 from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.tts import TTSException, TTSService
 
@@ -108,6 +131,11 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
         ),
         "ui_theme": body.ui_theme or settings.ui_theme,
     }
+    path_changed = False
+    if body.zomboid_path is not None:
+        normalized_path = str(normalize_zomboid_path(body.zomboid_path))
+        values["zomboid_path"] = normalized_path
+        path_changed = normalized_path != settings.zomboid_path
     values.update(credential_updates)
     tts_fields = (
         "tts_synthesis_workers",
@@ -139,6 +167,10 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
     settings.request_timeout = values["request_timeout"]
     settings.bridge_poll_interval = values["bridge_poll_interval"]
     settings.ui_theme = values["ui_theme"]
+    if path_changed:
+        settings.zomboid_path = str(values["zomboid_path"])
+        request.app.state.game_bridge_settings.set_zomboid_path(settings.zomboid_path)
+        await request.app.state.bridge_controller.set_zomboid_path(settings.zomboid_path)
     for key, value in credential_updates.items():
         setattr(settings, key, value)
     await registry.invalidate(changed_providers)
@@ -187,6 +219,271 @@ async def ui_logs(
     request: Request, limit: int = DEFAULT_ACTIVITY_LIMIT
 ) -> UILogResponse:
     return UILogResponse(entries=request.app.state.database.recent_logs(limit))
+
+
+@router.get("/api/debug/traces", tags=["debug"])
+async def ui_debug_traces(
+    request: Request,
+    limit: int = DEFAULT_TRACE_LIMIT,
+    request_id: str = "",
+    search: str = "",
+) -> dict[str, object]:
+    """Return bounded local LLM traces; they are never save-scoped memory."""
+    database: SettingsDatabase = request.app.state.database
+    items = database.recent_llm_traces(limit, request_id=request_id, search=search)
+    return {
+        "status": "ok",
+        "enabled": bool(request.app.state.settings.llm_trace_capture),
+        "items": items,
+        "total": len(items),
+    }
+
+
+@router.post("/api/debug/traces/settings", tags=["debug"])
+async def update_ui_debug_trace_settings(
+    request: Request, body: UIDebugTraceSettingsRequest
+) -> dict[str, object]:
+    """Toggle full prompt/context capture and clear retained data when disabling."""
+    settings = request.app.state.settings
+    database: SettingsDatabase = request.app.state.database
+    settings.llm_trace_capture = body.enabled
+    database.save_settings({"llm_trace_capture": body.enabled})
+    if not body.enabled:
+        database.clear_llm_traces()
+    return {
+        "status": "ok",
+        "enabled": settings.llm_trace_capture,
+        "items": database.recent_llm_traces(DEFAULT_TRACE_LIMIT),
+    }
+
+
+@router.post("/api/debug/traces/clear", tags=["debug"])
+async def clear_ui_debug_traces(request: Request) -> dict[str, object]:
+    deleted = request.app.state.database.clear_llm_traces()
+    return {"status": "ok", "deleted": deleted}
+
+
+def _memory_worlds(request: Request) -> list[dict[str, object]]:
+    return SQLiteMemoryStore.list_worlds(memory_root_for_settings(request.app.state.settings))
+
+
+def _memory_store(request: Request, world_uuid: str) -> SQLiteMemoryStore:
+    worlds = {item["world_uuid"] for item in _memory_worlds(request)}
+    if world_uuid not in worlds:
+        raise HTTPException(status_code=404, detail=f"Memory world '{world_uuid}' was not found")
+    return SQLiteMemoryStore(memory_root_for_settings(request.app.state.settings), world_uuid)
+
+
+@router.get("/api/memory/worlds", tags=["memory"])
+async def ui_memory_worlds(request: Request) -> dict[str, object]:
+    """List existing save-scoped memory databases without creating any."""
+
+    return {"status": "ok", "worlds": _memory_worlds(request)}
+
+
+@router.get("/api/memory", tags=["memory"])
+async def ui_memory(
+    request: Request,
+    world_uuid: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    search: str = "",
+    record_kind: Literal["all", "memory", "episode", "fact", "day_synopsis"] = "all",
+) -> dict[str, object]:
+    """Return a bounded, searchable view of reusable memory-layer records."""
+
+    worlds = _memory_worlds(request)
+    selected_world = world_uuid or (str(worlds[0]["world_uuid"]) if worlds else None)
+    if selected_world is None:
+        return {
+            "status": "ok",
+            "world_uuid": None,
+            "items": [],
+            "total": 0,
+            "limit": max(1, min(int(limit), 200)),
+            "offset": max(0, int(offset)),
+            "worlds": worlds,
+        }
+    store = _memory_store(request, selected_world)
+    return {"status": "ok", **store.list_saved_memories(
+        limit=limit,
+        offset=offset,
+        search=search,
+        record_kind=record_kind,
+    ), "worlds": worlds}
+
+
+@router.post("/api/memory/delete", tags=["memory"])
+async def ui_delete_memory(
+    request: Request, body: MemoryDeleteRequest
+) -> dict[str, object]:
+    """Delete one explicitly selected durable memory-layer record."""
+
+    store = _memory_store(request, body.world_uuid)
+    try:
+        deleted = store.delete_saved_memory(
+            body.record_kind,
+            body.record_id,
+            player_uuid=body.player_uuid,
+            npc_uuid=body.npc_uuid,
+            game_day=body.game_day,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Memory record was not found")
+    return {
+        "status": "ok",
+        "deleted": True,
+        "record_kind": body.record_kind,
+        "record_id": body.record_id,
+        "worlds": _memory_worlds(request),
+    }
+
+
+@router.post("/api/mock-chat/seed", tags=["memory"])
+async def seed_mock_memories(
+    request: Request, body: MockChatSeedRequest
+) -> dict[str, object]:
+    """Create an idempotent fixture for testing the real memory retriever."""
+
+    scope = MemoryScope(body.world_uuid, body.player_uuid, body.npc_uuid)
+    store = SQLiteMemoryStore(memory_root_for_settings(request.app.state.settings), body.world_uuid)
+    participants = (body.player_uuid, body.npc_uuid)
+    store.remember(
+        MemoryRecord(
+            memory_id="mock-memory-riverside",
+            scope=scope,
+            memory_type=MemoryType.FACT,
+            content="The group agreed that the Riverside shelter is north of the gas station.",
+            tags=("mock", "riverside", "shelter"),
+            importance=0.9,
+            provenance={"source": "mock_fixture"},
+            visibility=MemoryVisibility.PUBLIC,
+            game_day=body.game_day,
+            participants=participants,
+        )
+    )
+    store.remember(
+        MemoryRecord(
+            memory_id="mock-memory-gift",
+            scope=scope,
+            memory_type=MemoryType.SOCIAL_EVENT,
+            content="The player gave Mock NPC a red scarf, and Mock NPC appreciated the gift.",
+            tags=("mock", "gift", "scarf"),
+            importance=0.75,
+            provenance={"source": "mock_fixture"},
+            visibility=MemoryVisibility.PUBLIC,
+            game_day=body.game_day,
+            participants=participants,
+        )
+    )
+    store.remember_episode(
+        MemoryEpisode(
+            episode_id="mock-episode-riverside",
+            scope=scope,
+            conversation_id="mock-seed",
+            game_day=body.game_day,
+            participants=participants,
+            witnesses=participants,
+            topic_tags=("riverside", "shelter"),
+            summary="The mock group discussed the Riverside shelter route.",
+            key_facts=("The shelter is north of the gas station.",),
+            importance=0.8,
+            visibility=MemoryVisibility.PUBLIC,
+        )
+    )
+    store.save_structured_fact(
+        StructuredFact(
+            fact_id="mock-fact-riverside",
+            scope=scope,
+            kind="LOCATION",
+            content="Riverside shelter is north of the gas station.",
+            source_uuid=body.player_uuid,
+            truth_status="stated",
+            visibility=MemoryVisibility.PUBLIC,
+            game_day=body.game_day,
+            importance=0.85,
+            provenance={"source": "mock_fixture", "participants": list(participants)},
+            conversation_id="mock-seed",
+        )
+    )
+    store.save_day_synopsis(
+        DaySynopsis(
+            scope=scope,
+            game_day=body.game_day,
+            synopsis="The mock group discussed the Riverside shelter.",
+            commitments=("Travel north to Riverside",),
+        )
+    )
+    return {
+        "status": "ok",
+        "seeded": True,
+        "world_uuid": body.world_uuid,
+        "stats": store.stats(),
+        "worlds": _memory_worlds(request),
+    }
+
+
+@router.post("/api/mock-chat", tags=["memory"])
+async def mock_chat(request: Request, body: MockChatRequest) -> dict[str, object]:
+    """Run an isolated panel chat through ConversationService and memory RAG."""
+
+    service = getattr(request.app.state, "conversation_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="Conversation service is not ready")
+    participant_ids = {body.player_uuid, body.npc_uuid}
+    participants = [dict(item) for item in body.participants]
+    participant_ids.update(str(item.get("id")) for item in participants if item.get("id"))
+    participants.extend(
+        {"id": identity, "name": name, "kind": kind}
+        for identity, name, kind in (
+            (body.player_uuid, body.player_name, "player"),
+            (body.npc_uuid, body.npc_name, "npc"),
+        )
+        if not any(str(item.get("id")) == identity for item in participants)
+    )
+    session_id = body.session_id or (
+        f"mock-session:{body.world_uuid}:{body.player_uuid}:{body.npc_uuid}"
+    )
+    conversation = ConversationRequest(
+        request_id=f"mock-chat:{uuid.uuid4().hex}",
+        scope=MemoryScope(body.world_uuid, body.player_uuid, body.npc_uuid),
+        session_id=session_id,
+        message=body.message.strip(),
+        npc_name=body.npc_name,
+        player_name=body.player_name,
+        character_card=body.character_card,
+        relationship_snapshot=body.relationship_snapshot,
+        preferences=body.preferences,
+        current_state=body.current_state,
+        scene=body.scene,
+        participants=tuple(participants[:16]),
+        current_topic=body.current_topic,
+        mentioned_entities=tuple(body.mentioned_entities[:16]),
+        game_day=body.game_day,
+        world_age_hours=body.world_age_hours,
+        available_tools=tuple(body.available_tools[:12]),
+        provider=body.provider,
+        model=body.model,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
+        metadata={"source": "pbrainz-mock-chat", "participant_ids": sorted(participant_ids)},
+        end_session=body.end_session,
+    )
+    result = await service.complete(conversation)
+    completion = _completion_response(result.completion, result.completion.model)
+    response = completion.model_dump(exclude_none=True)
+    response.update(
+        {
+            "status": "ok",
+            "session_id": result.session_id,
+            "response_text": result.completion.text,
+            "retrieved_memories": [match.as_diagnostic() for match in result.retrieved_memories],
+            "diagnostics": result.diagnostics,
+        }
+    )
+    return response
 
 
 @router.get("/api/tts", tags=["tts"])
@@ -369,8 +666,34 @@ async def control_panel_chat(
     registry = _registry(request)
     provider_name, model_name = registry.resolve(body.provider, body.model)
     provider_request = body.model_copy(update={"model": model_name, "stream": False})
+    trace_id = f"control-chat:{uuid.uuid4().hex}"
+    if request.app.state.settings.llm_trace_capture:
+        request.app.state.database.add_llm_trace(
+            source="pbrainz.control",
+            phase="provider.request",
+            request_id=trace_id,
+            payload={
+                "provider": provider_name,
+                "model": model_name,
+                **provider_request.model_dump(exclude_none=True),
+            },
+        )
     LOGGER.info("control panel chat provider=%s model=%s", provider_name, model_name)
     result = await registry.complete(provider_name, provider_request)
+    if request.app.state.settings.llm_trace_capture:
+        request.app.state.database.add_llm_trace(
+            source="pbrainz.control",
+            phase="provider.response",
+            request_id=trace_id,
+            payload={
+                "model": result.model,
+                "text": result.text,
+                "finish_reason": result.finish_reason,
+                "tool_calls": result.tool_calls,
+                "reasoning": result.reasoning,
+                "usage": result.usage.as_dict() if result.usage else None,
+            },
+        )
     LOGGER.info(
         "control panel inference completed provider=%s model=%s response_chars=%s",
         provider_name,

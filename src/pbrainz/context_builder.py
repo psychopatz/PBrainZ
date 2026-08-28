@@ -12,6 +12,7 @@ from typing import Any
 
 from pbrainz.api.models import ChatMessage
 from pbrainz.memory.types import ConversationTurn, RetrievalMatch
+from pbrainz.tool_routing import ToolRouter
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +23,11 @@ class ContextInput:
     relationship_snapshot: dict[str, Any] = field(default_factory=dict)
     preferences: dict[str, Any] = field(default_factory=dict)
     current_state: dict[str, Any] = field(default_factory=dict)
+    scene: dict[str, Any] = field(default_factory=dict)
+    day_synopsis: str = ""
+    structured_facts: tuple[dict[str, Any], ...] = ()
     retrieved_memories: tuple[RetrievalMatch, ...] = ()
+    recalled_turns: tuple[ConversationTurn, ...] = ()
     recent_turns: tuple[ConversationTurn, ...] = ()
     available_tools: tuple[dict[str, Any], ...] = ()
     current_message: str = ""
@@ -53,10 +58,18 @@ class ContextBuilder:
         max_chars: int = 12000,
         recent_turn_limit: int = 8,
         memory_limit: int = 6,
+        tool_rag_enabled: bool = True,
+        tool_limit: int = 8,
+        tool_budget_chars: int = 2600,
     ) -> None:
         self.max_chars = max(2000, min(int(max_chars), 100000))
         self.recent_turn_limit = max(1, min(int(recent_turn_limit), 32))
         self.memory_limit = max(1, min(int(memory_limit), 16))
+        self.tool_rag_enabled = bool(tool_rag_enabled)
+        self.tool_router = ToolRouter(
+            max_results=tool_limit,
+            budget_chars=tool_budget_chars,
+        )
 
     def build(self, value: ContextInput) -> ContextBuildResult:
         sections: list[tuple[str, str, bool]] = [
@@ -76,16 +89,38 @@ class ContextBuilder:
         relationship = self._relevant_relationship(value.relationship_snapshot)
         if relationship:
             sections.append(("Relationship Snapshot", relationship, False))
+        scene = self._render_scene(value.scene)
+        if scene:
+            sections.append(("Conversation Scene", scene, False))
+        if value.day_synopsis.strip():
+            sections.append(("Today So Far", value.day_synopsis.strip()[:2400], False))
+        facts = self._render_facts(value.structured_facts)
+        if facts:
+            sections.append(("Structured Conversational Facts", facts, False))
         preferences = self._relevant_preferences(value.preferences, value.current_message)
         if preferences:
             sections.append(("Relevant Preferences", preferences, False))
         memories = self._render_memories(value.retrieved_memories[: self.memory_limit])
         if memories:
             sections.append(("Relevant Memories", memories, False))
+        recalled = self._render_recalled_turns(value.recalled_turns)
+        if recalled:
+            sections.append(("Relevant Conversation Recall", recalled, False))
         state = self._notable_state(value.current_state)
         if state:
             sections.append(("Current State", state, False))
-        tools = self._compact_tools(value.available_tools)
+        tool_selection = self.tool_router.select(
+            value.available_tools,
+            value.current_message,
+            current_topic=value.scene.get("current_topic")
+            if isinstance(value.scene, dict)
+            else None,
+            fallback_safe=True,
+        )
+        selected_tools = tool_selection.selected
+        if not self.tool_rag_enabled:
+            selected_tools = tuple(value.available_tools[: self.tool_router.max_results])
+        tools = self._compact_tools(selected_tools)
         if tools:
             sections.append(("Available Tools", tools, False))
 
@@ -128,12 +163,25 @@ class ContextBuilder:
             "system_chars": len(messages[0].content or ""),
             "recent_turns": max(0, len(messages) - 2),
             "retrieved_memories": len(value.retrieved_memories[: self.memory_limit]),
+            "recalled_turns": len(value.recalled_turns),
+            "day_synopsis_chars": len(value.day_synopsis.strip()),
+            "structured_facts": len(value.structured_facts),
+            "scene_participants": len(
+                value.scene.get("participants", [])
+                if isinstance(value.scene, dict)
+                else []
+            ),
             "tools": len(tools.splitlines()) if tools else 0,
+            "tool_routing": {
+                **tool_selection.diagnostics,
+                "enabled": self.tool_rag_enabled,
+                "sent": len(selected_tools),
+            },
             "omitted_sections": omitted,
         }
         return ContextBuildResult(
             messages=messages,
-            tools=list(value.available_tools[:12]),
+            tools=list(selected_tools),
             diagnostics=diagnostics,
         )
 
@@ -227,11 +275,60 @@ class ContextBuilder:
         return ContextBuilder._render_mapping(selected, 1500)
 
     @staticmethod
+    def _render_scene(value: dict[str, Any]) -> str:
+        if not isinstance(value, dict):
+            return ""
+        lines: list[str] = []
+        for key in (
+            "location",
+            "current_topic",
+            "current_speaker_id",
+            "addressed_targets",
+            "active_participants",
+            "background_participants",
+        ):
+            rendered = ContextBuilder._render_value(value.get(key))
+            if rendered:
+                lines.append(f"{key}: {rendered}")
+        return "\n".join(lines)[:1800]
+
+    @staticmethod
+    def _render_facts(facts: tuple[dict[str, Any], ...]) -> str:
+        lines: list[str] = []
+        for fact in facts[:12]:
+            if not isinstance(fact, dict):
+                continue
+            kind = str(fact.get("kind") or "fact")
+            status = str(fact.get("truth_status") or "unverified")
+            content = str(fact.get("content") or "").strip()
+            if content:
+                lines.append(f"- [{kind}; {status}] {content[:600]}")
+        return "\n".join(lines)[:3000]
+
+    @staticmethod
     def _render_memories(matches: tuple[RetrievalMatch, ...]) -> str:
         lines = []
         for match in matches:
             memory = match.memory
-            lines.append(f"- [{memory.memory_type.value}] {memory.content[:900]}")
+            day = f" day {memory.game_day}" if memory.game_day is not None else ""
+            visibility = memory.visibility.value
+            lines.append(
+                f"- [{memory.memory_type.value}; {visibility}{day}] "
+                f"{memory.content[:900]}"
+            )
+        return "\n".join(lines)[:3200]
+
+    @staticmethod
+    def _render_recalled_turns(turns: tuple[ConversationTurn, ...]) -> str:
+        lines = []
+        for turn in turns[:8]:
+            speaker = turn.speaker_name or turn.role
+            day = (
+                f"game day {turn.game_day}: "
+                if turn.game_day is not None
+                else ""
+            )
+            lines.append(f"- [{day}{speaker}] {turn.content[:700]}")
         return "\n".join(lines)[:3200]
 
     @staticmethod

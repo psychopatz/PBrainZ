@@ -24,6 +24,7 @@ from .delivery import (
 )
 from .protocol import MAX_DELIVERY_TEXT, NAMESPACE
 from .state import BridgeState
+from .voice import voice_channel_available
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,21 @@ async def complete_and_deliver(
     npc_id = str(request.get("npc_id") or "")
     if not request_id or not npc_id:
         raise ValueError("Project Hoomans returned an incomplete LLM request")
+    if conversation_service and conversation_service.debug_trace_enabled():
+        conversation_service.record_debug_trace(
+            "bridge.request",
+            request,
+            request_id=request_id,
+            npc_id=npc_id,
+            session_id=str(
+                (request.get("conversation_context") or request.get("context") or {}).get(
+                    "session_id", ""
+                )
+                if isinstance(request.get("conversation_context") or request.get("context"), dict)
+                else ""
+            ),
+            source="project-hoomans.bridge",
+        )
     tts_utterance: Utterance | None = None
     LOGGER.info(
         "NPC provider task started npc=%s request=%s message=%s",
@@ -95,24 +111,57 @@ async def complete_and_deliver(
                 provider_name,
                 body.model_copy(update={"model": model_name}),
             )
+        response_text = str(result.text or "").strip()
+        semantic_tool_calls = (
+            semantic_tool_calls_for(result.tool_calls, request) if structured else []
+        )
+        presentation_reason: str | None = None
+        if not response_text and semantic_tool_calls:
+            # Providers commonly return a tool-only assistant turn.  The game
+            # will execute the semantic call, but it still needs one shared
+            # piece of dialogue for the conversation log, nameplate, and TTS.
+            # Keep this deliberately non-committal: acceptance is decided by
+            # the game after delivery, so this must not claim that the action
+            # already succeeded.
+            response_text = tool_ack_text(request)
+            presentation_reason = "tool_ack"
         arguments: dict[str, Any] = {
             "request_id": request_id,
             "npc_id": npc_id,
-            "response_text": result.text[:MAX_DELIVERY_TEXT],
+            "response_text": response_text[:MAX_DELIVERY_TEXT],
+            "finish_reason": str(result.finish_reason or "unknown")[:128],
+            "tool_call_count": len(result.tool_calls or []),
         }
+        if presentation_reason:
+            arguments["presentation_reason"] = presentation_reason
+            arguments["tool_result_pending"] = True
         if structured and conversation_service and conversation_service.settings.llm_diagnostics:
             arguments["diagnostics"] = conversation_result.diagnostics
-        if structured:
-            semantic_tool_calls = semantic_tool_calls_for(result.tool_calls, request)
-            if semantic_tool_calls:
-                arguments["semantic_tool_calls"] = semantic_tool_calls
-        if not failure_reason and tts_service and tts_service.enabled:
+        if semantic_tool_calls:
+            arguments["semantic_tool_calls"] = semantic_tool_calls
+        if not response_text and not semantic_tool_calls:
+            failure_reason = "provider_empty_response"
+            arguments["error"] = (
+                "LLM provider returned an empty response "
+                f"(finish_reason={str(result.finish_reason or 'unknown')[:128]}, "
+                f"tool_calls={len(result.tool_calls or [])})."
+            )
+        # Core's generic voice channel now owns presentation for all
+        # canonical NPC messages, including authored dialogue. Keep the old
+        # request-scoped TTS path only for older game/Core runtimes that do
+        # not advertise that channel.
+        if (
+            not failure_reason
+            and tts_service
+            and tts_service.enabled
+            and not voice_channel_available(state)
+        ):
             tts_utterance = _build_tts_utterance(
                 tts_service,
                 request,
                 request_id,
                 npc_id,
-                result.text,
+                response_text,
             )
             if tts_utterance:
                 arguments.update(
@@ -123,12 +172,15 @@ async def complete_and_deliver(
                     }
                 )
         LOGGER.info(
-            "NPC response received from provider npc=%s request=%s provider=%s model=%s text=%s",
+            "NPC response received from provider npc=%s request=%s provider=%s model=%s "
+            "finish_reason=%s tool_calls=%s text=%s",
             npc_id,
             request_id,
             provider_name,
             model_name,
-            preview(result.text),
+            result.finish_reason or "unknown",
+            len(result.tool_calls or []),
+            preview(response_text),
         )
     except ProviderError as error:
         failure_reason = error.code
@@ -151,6 +203,24 @@ async def complete_and_deliver(
         preview(arguments.get("response_text")),
         preview(arguments.get("error")),
     )
+    if conversation_service and conversation_service.debug_trace_enabled():
+        conversation_service.record_debug_trace(
+            "bridge.delivery",
+            {
+                "provider": provider_name,
+                "model": model_name,
+                "failure_reason": failure_reason,
+                "arguments": arguments,
+            },
+            request_id=request_id,
+            npc_id=npc_id,
+            session_id=(
+                conversation_result.session_id
+                if structured and "conversation_result" in locals()
+                else ""
+            ),
+            source="project-hoomans.bridge",
+        )
     await client.call(NAMESPACE, "deliverChat", arguments, state.runtime_id or "")
     if tts_utterance and tts_service:
         try:
@@ -164,6 +234,14 @@ async def complete_and_deliver(
             tts_service.last_error = f"TTS queue failure: {error}"[:500]
             LOGGER.warning("TTS queue failed; requesting text-only fallback: %s", error)
             accepted = False
+        LOGGER.info(
+            "NPC TTS enqueue %s npc=%s request=%s utterance=%s reason=%s",
+            "accepted" if accepted else "rejected",
+            npc_id,
+            request_id,
+            tts_utterance.utterance_id,
+            "ready" if accepted else (tts_service.last_error or "unknown"),
+        )
         if not accepted:
             await _publish_speech_fallback(
                 client,
@@ -208,6 +286,17 @@ def request_message(request: dict[str, Any]) -> str:
     return ""
 
 
+def tool_ack_text(request: dict[str, Any]) -> str:
+    """Return safe dialogue for a tool-only turn before game validation."""
+    context = request.get("conversation_context") or request.get("context")
+    if isinstance(context, dict):
+        for key in ("tool_ack_text", "toolAckText"):
+            value = context.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:MAX_DELIVERY_TEXT]
+    return "I'll check that now."
+
+
 def preview(value: object, limit: int = 1200) -> str:
     rendered = " ".join(str(value or "").split())
     if not rendered:
@@ -237,12 +326,14 @@ def semantic_tool_calls_for(
         if name:
             exposed.add(str(name))
     normalized: list[dict[str, Any]] = []
+    rejected: list[str] = []
     for call in tool_calls[:8]:
         if not isinstance(call, dict):
             continue
         function = call.get("function") if isinstance(call.get("function"), dict) else call
         name = str(function.get("name") or "").strip()
         if not name or name not in exposed:
+            rejected.append(name or "<missing>")
             continue
         raw_arguments = function.get("arguments") or {}
         if isinstance(raw_arguments, str):
@@ -261,5 +352,12 @@ def semantic_tool_calls_for(
                 },
             }
         )
+    if rejected:
+        LOGGER.warning(
+            "NPC provider tool calls rejected npc=%s request=%s rejected=%s exposed=%s",
+            str(request.get("npc_id") or "unknown"),
+            str(request.get("request_id") or "unknown"),
+            ",".join(rejected[:8]),
+            ",".join(sorted(exposed)[:16]) or "<none>",
+        )
     return normalized
-

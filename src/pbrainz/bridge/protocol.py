@@ -13,6 +13,9 @@ MAX_REQUEST_BYTES = 32 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_STRING = 4096
 NAMESPACE = "projecthoomans.llm"
+CORE_NAMESPACE = "psychopatzcore.bridge"
+TOOL_CATALOG_COMMAND = "toolCatalog"
+POLL_PACKETS_COMMAND = "pollPackets"
 MAX_DELIVERY_TEXT = MAX_STRING - 128
 
 
@@ -105,4 +108,3 @@ class BridgeResponse:
         if error is not None and not isinstance(error, dict):
             raise BridgeClientError("bridge response error is not an object")
         return cls(request_id, runtime_id, status, result, error)
-

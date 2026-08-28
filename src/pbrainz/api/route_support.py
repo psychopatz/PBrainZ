@@ -64,6 +64,7 @@ def _ui_status(request: Request) -> UIStatus:
         ),
         request_timeout=settings.request_timeout,
         bridge_poll_interval=settings.bridge_poll_interval,
+        zomboid_path=settings.zomboid_path,
         ui_theme=settings.ui_theme,
         providers=provider_statuses,
         openai_base_url=settings.openai_base_url,

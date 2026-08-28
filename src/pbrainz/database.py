@@ -16,6 +16,9 @@ from pbrainz.branding import DATABASE_ENV, DATABASE_NAME, PORTABLE_ROOT_ENV
 DEFAULT_DATABASE_NAME = DATABASE_NAME
 DEFAULT_ACTIVITY_LIMIT = 50
 MAX_ACTIVITY_LIMIT = 500
+DEFAULT_TRACE_LIMIT = 100
+MAX_TRACE_LIMIT = 300
+MAX_TRACE_PAYLOAD_CHARS = 50000
 PERSISTED_SETTINGS = (
     "app_name",
     "host",
@@ -28,6 +31,7 @@ PERSISTED_SETTINGS = (
     "max_retries",
     "bridge_required",
     "bridge_root",
+    "zomboid_path",
     "bridge_poll_interval",
     "open_gui",
     "openai_api_key",
@@ -53,6 +57,7 @@ PERSISTED_SETTINGS = (
     "memory_retrieval_limit",
     "memory_consolidation_turns",
     "llm_diagnostics",
+    "llm_trace_capture",
     "tts_enabled",
     "tts_piper_executable",
     "tts_model_root",
@@ -113,6 +118,20 @@ class SettingsDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_activity_log_created
                     ON activity_log(created_at DESC);
+                CREATE TABLE IF NOT EXISTS llm_trace (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    npc_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_trace_created
+                    ON llm_trace(created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_llm_trace_request
+                    ON llm_trace(request_id);
                 """
             )
             connection.commit()
@@ -236,6 +255,120 @@ class SettingsDatabase:
             connection.close()
         return [dict(row) for row in reversed(rows)]
 
+    def add_llm_trace(
+        self,
+        *,
+        source: str,
+        phase: str,
+        request_id: str = "",
+        npc_id: str = "",
+        session_id: str = "",
+        payload: object = None,
+    ) -> None:
+        """Store one bounded opt-in LLM diagnostic event.
+
+        This is intentionally separate from activity_log and save-scoped memory:
+        traces are local troubleshooting data, never NPC memory. Callers should
+        check their capture setting before constructing large payloads.
+        """
+        serialized = json.dumps(
+            _json_safe(payload), ensure_ascii=False, separators=(",", ":")
+        )
+        if len(serialized) > MAX_TRACE_PAYLOAD_CHARS:
+            serialized = json.dumps(
+                {
+                    "truncated": True,
+                    "original_chars": len(serialized),
+                    "preview": serialized[: MAX_TRACE_PAYLOAD_CHARS - 160],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        connection = self._connect()
+        try:
+            connection.execute(
+                """
+                INSERT INTO llm_trace(
+                    created_at, source, phase, request_id, npc_id, session_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _now(),
+                    str(source)[:160],
+                    str(phase)[:160],
+                    str(request_id)[:256],
+                    str(npc_id)[:256],
+                    str(session_id)[:256],
+                    serialized,
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM llm_trace
+                WHERE id <= COALESCE((SELECT MAX(id) FROM llm_trace), 0) - ?
+                """,
+                (MAX_TRACE_LIMIT,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def recent_llm_traces(
+        self,
+        limit: int = DEFAULT_TRACE_LIMIT,
+        *,
+        request_id: str = "",
+        search: str = "",
+    ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), MAX_TRACE_LIMIT))
+        filters: list[str] = []
+        parameters: list[object] = []
+        if request_id.strip():
+            filters.append("request_id = ?")
+            parameters.append(request_id.strip()[:256])
+        if search.strip():
+            search_value = f"%{search.strip()[:160]}%"
+            filters.append(
+                "(request_id LIKE ? OR npc_id LIKE ? OR session_id LIKE ? "
+                "OR source LIKE ? OR phase LIKE ? OR payload_json LIKE ?)"
+            )
+            parameters.extend([search_value] * 6)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT id, created_at, source, phase, request_id, npc_id, session_id,
+                       payload_json
+                FROM llm_trace
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (*parameters, bounded_limit),
+            ).fetchall()
+        finally:
+            connection.close()
+        result: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json"))
+            except (TypeError, json.JSONDecodeError):
+                item["payload"] = {"unavailable": True}
+                item.pop("payload_json", None)
+            result.append(item)
+        return result
+
+    def clear_llm_traces(self) -> int:
+        connection = self._connect()
+        try:
+            cursor = connection.execute("DELETE FROM llm_trace")
+            connection.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            connection.close()
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
@@ -245,6 +378,27 @@ class SettingsDatabase:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _json_safe(value: object, depth: int = 0) -> object:
+    """Make arbitrary provider/game diagnostics bounded and JSON-compatible."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, str):
+            return value[:12000]
+        return value
+    if depth >= 6:
+        return "[depth-limit]"
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= 96:
+                result["[truncated]"] = "96+ entries"
+                break
+            result[str(key)[:256]] = _json_safe(child, depth + 1)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(child, depth + 1) for child in list(value)[:96]]
+    return str(value)[:12000]
 
 
 def _default_database_path() -> Path:
@@ -263,4 +417,3 @@ def application_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd()
-

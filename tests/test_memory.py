@@ -1,12 +1,19 @@
+import sqlite3
+
 import pytest
 
 from pbrainz.context_builder import ContextBuilder, ContextInput
 from pbrainz.memory import (
     ConversationTurn,
+    DaySynopsis,
+    MemoryEpisode,
+    MemoryQuery,
     MemoryRecord,
     MemoryScope,
     MemoryType,
+    MemoryVisibility,
     SQLiteMemoryStore,
+    StructuredFact,
 )
 
 
@@ -94,3 +101,227 @@ def test_hearsay_memory_keeps_claim_provenance_without_making_a_fact(tmp_path) -
     assert memory.provenance["source_npc_uuid"] == "npc-alice"
     assert memory.provenance["subject_npc_uuid"] == "npc-sarah"
     assert store.retrieve(scope, "medicine")[0].memory.memory_type is MemoryType.HEARSAY
+
+
+def test_canonical_turn_write_is_idempotent_and_date_aware(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    scope = MemoryScope("world-one", "player-one", "npc-one")
+    store.ensure_session("conversation-one", scope)
+
+    first = store.record_turn(
+        "conversation-one",
+        scope,
+        "assistant",
+        "The shelter is north.",
+        message_id="conversation-one:1",
+        game_day=4,
+        world_age_hours=97.5,
+        speaker_uuid="npc-one",
+        speaker_name="Harley",
+        speaker_kind="npc",
+    )
+    duplicate = store.record_turn(
+        "conversation-one",
+        scope,
+        "assistant",
+        "This retry must not create another turn.",
+        message_id="conversation-one:1",
+        game_day=4,
+        world_age_hours=97.5,
+        speaker_uuid="npc-one",
+        speaker_name="Harley",
+        speaker_kind="npc",
+    )
+
+    assert first.duplicate is False
+    assert duplicate.duplicate is True
+    assert duplicate.turn.content == first.turn.content
+    assert duplicate.turn.game_day == 4
+    assert duplicate.turn.speaker_uuid == "npc-one"
+    assert store.stats()["turn_count"] == 1
+
+
+def test_canonical_turn_columns_migrate_existing_database(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(store.path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE world_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO world_metadata(key, value) VALUES ('world_uuid', 'world-one');
+            CREATE TABLE conversation_sessions (
+                session_id TEXT PRIMARY KEY,
+                world_uuid TEXT NOT NULL,
+                player_uuid TEXT NOT NULL,
+                npc_uuid TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                ended_at TEXT,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                summary TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO conversation_sessions(
+                session_id, world_uuid, player_uuid, npc_uuid,
+                started_at, last_activity_at
+            ) VALUES ('conversation-one', 'world-one', 'player-one', 'npc-one', 'now', 'now');
+            CREATE TABLE conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                world_uuid TEXT NOT NULL,
+                player_uuid TEXT NOT NULL,
+                npc_uuid TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """
+        )
+
+    result = store.record_turn(
+        "conversation-one",
+        MemoryScope("world-one", "player-one", "npc-one"),
+        "assistant",
+        "Migrated safely.",
+        message_id="conversation-one:1",
+        game_day=1,
+    )
+
+    assert result.duplicate is False
+    assert result.turn.message_id == "conversation-one:1"
+    assert store.stats()["turn_count"] == 1
+
+
+def test_actor_visibility_filters_private_memory_and_shares_public_episode(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    alice = MemoryScope("world-one", "player-one", "npc-alice")
+    bob = MemoryScope("world-one", "player-one", "npc-bob")
+    store.remember(
+        MemoryRecord(
+            "alice-private",
+            alice,
+            MemoryType.OPINION,
+            "Alice privately distrusts Bob.",
+            importance=0.9,
+            visibility=MemoryVisibility.PRIVATE,
+        )
+    )
+    store.remember_episode(
+        MemoryEpisode(
+            "episode-riverside",
+            alice,
+            "conversation-riverside",
+            8,
+            participants=("player-one", "npc-alice", "npc-bob"),
+            summary="The group discussed the Riverside route.",
+            topic_tags=("riverside",),
+        )
+    )
+
+    matches = store.retrieve_query(
+        MemoryQuery(
+            scope=bob,
+            actor_id="npc-bob",
+            current_message="What happened at Riverside?",
+            participants=("player-one", "npc-alice", "npc-bob"),
+        )
+    )
+
+    assert any(match.memory.memory_type is MemoryType.EPISODE for match in matches)
+    assert all(match.memory.memory_id != "alice-private" for match in matches)
+
+
+def test_day_synopsis_and_structured_facts_are_dated_and_actor_filtered(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    alice = MemoryScope("world-one", "player-one", "npc-alice")
+    bob = MemoryScope("world-one", "player-one", "npc-bob")
+    store.save_day_synopsis(
+        DaySynopsis(
+            scope=alice,
+            game_day=4,
+            synopsis="- Alice agreed to check the shed.",
+            commitments=("Check the shed",),
+        )
+    )
+    store.save_structured_fact(
+        StructuredFact(
+            fact_id="alice-private-plan",
+            scope=alice,
+            kind="PLAN",
+            content="Alice plans to leave before dawn.",
+            visibility=MemoryVisibility.PRIVATE,
+            game_day=4,
+        )
+    )
+
+    synopsis = store.get_day_synopsis(alice, 4)
+    assert synopsis is not None
+    assert synopsis.commitments == ("Check the shed",)
+    assert store.get_day_synopsis(alice, 5) is None
+    assert store.list_structured_facts(
+        MemoryQuery(scope=bob, actor_id="npc-bob", current_message="plans")
+    ) == []
+
+
+def test_memory_browser_lists_layers_and_deletes_selected_records(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-browser")
+    scope = MemoryScope("world-browser", "player-one", "npc-one")
+    store.remember(
+        MemoryRecord(
+            "browser-memory",
+            scope,
+            MemoryType.FACT,
+            "The Riverside shelter is north.",
+            importance=0.8,
+            visibility=MemoryVisibility.PUBLIC,
+            game_day=3,
+        )
+    )
+    store.remember_episode(
+        MemoryEpisode(
+            "browser-episode",
+            scope,
+            "browser-session",
+            3,
+            summary="We discussed the Riverside route.",
+            key_facts=("The shelter is north.",),
+        )
+    )
+    store.save_structured_fact(
+        StructuredFact(
+            "browser-fact",
+            scope,
+            "LOCATION",
+            "Riverside is north.",
+            game_day=3,
+        )
+    )
+    store.save_day_synopsis(
+        DaySynopsis(scope, 3, synopsis="Discussed Riverside.", commitments=("Travel north",))
+    )
+
+    listed = store.list_saved_memories(search="riverside")
+    assert listed["total"] == 4
+    assert {item["record_kind"] for item in listed["items"]} == {
+        "memory",
+        "episode",
+        "fact",
+        "day_synopsis",
+    }
+    assert listed["items"][0]["preview"]
+
+    assert store.delete_saved_memory("memory", "browser-memory") is True
+    assert all(
+        match.memory.memory_id != "browser-memory" for match in store.retrieve(scope, "Riverside")
+    )
+    assert store.delete_saved_memory(
+        "day_synopsis",
+        "player-one:npc-one:3",
+        player_uuid="player-one",
+        npc_uuid="npc-one",
+        game_day=3,
+    ) is True
+    assert store.list_saved_memories(record_kind="day_synopsis")["total"] == 0
+    assert store.delete_saved_memory("memory", "missing") is False

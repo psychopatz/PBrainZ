@@ -59,6 +59,7 @@ class GeminiProvider(LLMProvider):
             finish_reason=self._finish_reason(response),
             usage=self._usage(getattr(response, "usage_metadata", None)),
             tool_calls=self._tool_calls(response),
+            reasoning=self._reasoning(response),
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -290,6 +291,20 @@ class GeminiProvider(LLMProvider):
                     }
                 )
         return calls or None
+
+    @staticmethod
+    def _reasoning(response: Any) -> str | None:
+        """Capture explicitly returned thought parts, when the provider exposes them."""
+        parts: list[str] = []
+        for candidate in getattr(response, "candidates", None) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                if getattr(part, "thought", False) is not True:
+                    continue
+                text = getattr(part, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)[:12000] or None
 
     @staticmethod
     def _usage(usage: Any) -> TokenUsage | None:

@@ -20,6 +20,7 @@ class PanelState:
     model: tk.StringVar
     timeout: tk.StringVar
     poll_interval: tk.StringVar
+    zomboid_path: tk.StringVar
     theme: tk.StringVar
     openai_base_url: tk.StringVar
     openai_key: tk.StringVar
@@ -52,6 +53,7 @@ class PanelState:
             model=tk.StringVar(root),
             timeout=tk.StringVar(root, value="120"),
             poll_interval=tk.StringVar(root, value="0.5"),
+            zomboid_path=tk.StringVar(root),
             theme=tk.StringVar(root, value="light"),
             openai_base_url=tk.StringVar(root, value="https://api.openai.com/v1"),
             openai_key=tk.StringVar(root),
@@ -73,6 +75,7 @@ class PanelState:
             self.model,
             self.timeout,
             self.poll_interval,
+            self.zomboid_path,
             self.theme,
             self.openai_base_url,
             self.openai_key,

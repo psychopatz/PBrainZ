@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from pbrainz.config import Settings
+from pbrainz.conversation_service import TraceWriter
 from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.tts import TTSService
 
@@ -21,11 +22,14 @@ class BridgeController:
         providers: ProviderRegistry,
         monitor: BridgeRuntimeMonitor,
         tts_service: TTSService | None = None,
+        *,
+        trace_writer: TraceWriter | None = None,
     ) -> None:
         self.settings = settings
         self.providers = providers
         self.monitor = monitor
         self.tts_service = tts_service
+        self.trace_writer = trace_writer
         self._enabled = settings.bridge_required
         self._task: asyncio.Task[None] | None = None
 
@@ -49,6 +53,7 @@ class BridgeController:
                     self.providers,
                     self.monitor,
                     self.tts_service,
+                    trace_writer=self.trace_writer,
                 ),
                 name="p-brainz-bridge",
             )
@@ -71,6 +76,19 @@ class BridgeController:
             await self.start()
         else:
             await self.stop()
+
+    async def set_zomboid_path(self, path: str) -> None:
+        """Re-point the monitor and worker transport after a path change."""
+
+        self.settings.zomboid_path = path
+        self.monitor.set_root(
+            self.settings.bridge_root,
+            zomboid_path=path,
+        )
+        was_running = self.running
+        if was_running:
+            await self.stop()
+            await self.start()
 
     def as_dict(self) -> dict[str, object]:
         return {

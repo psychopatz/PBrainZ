@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pbrainz.paths import bridge_root_for
+
 from .protocol import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -21,12 +23,7 @@ class FileBridgeTransport:
     """Bounded fixed-slot transport matching PsychopatzBridgeFileTransport."""
 
     def __init__(self, root: str | Path | None = None) -> None:
-        configured_root = root or os.getenv("ZOMBOID_BRIDGE_ROOT")
-        self.root = (
-            Path(configured_root)
-            if configured_root
-            else Path.home() / "Zomboid" / "Lua" / "PsychopatzBridge"
-        )
+        self.root = bridge_root_for(explicit_bridge_root=root)
         self.requests = self.root / "requests"
         self.responses = self.root / "responses"
         self.state = self.root / "state"
@@ -144,4 +141,3 @@ class FileBridgeTransport:
     @classmethod
     def _path(cls, directory: Path, slot: int, suffix: str) -> Path:
         return directory / f"{cls._name(slot)}{suffix}"
-

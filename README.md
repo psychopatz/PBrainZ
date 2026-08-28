@@ -216,6 +216,13 @@ The control-panel bridge switch updates the same
 P BrainZ's polling worker together. Project Hoomans applies that setting
 while the game is running, so the profiler is not required for this workflow.
 
+The Settings tab exposes the Project Zomboid data directory used by the bridge.
+It defaults to the current user's conventional `Zomboid` directory and can be
+changed with the folder picker for redirected, portable, or non-standard
+installations. P BrainZ derives `Lua/PsychopatzBridge` and the Core bridge
+toggle-file path from that directory; explicit `ZOMBOID_BRIDGE_ROOT` and
+`ZOMBOID_BRIDGE_CONFIG` environment overrides remain supported.
+
 Keep the default localhost bind unless you have separately secured the
 service. This initial server does not provide authentication.
 
@@ -272,10 +279,12 @@ the bridge, P BrainZ calls the selected provider, and the NPC reply is added
 to the conversation log.
 
 The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
-and compact `speechStarted`/`speechFinished`/`speechFallback` events in the
-`projecthoomans.llm` namespace. Requests are tied to the current runtime ID
-and the active NPC conversation. Provider keys remain in
-P BrainZ's local SQLite database and never enter the game tunnel.
+`pollConversationSync`, `ackConversationSync`, and compact
+`speechStarted`/`speechFinished`/`speechFallback` events in the
+`projecthoomans.llm` namespace. Requests are tied to the current runtime ID.
+Canonical conversation messages use a bounded, retryable sync outbox, so
+closing the conversation UI does not discard a provider response. Provider
+keys remain in P BrainZ's local SQLite database and never enter the game tunnel.
 
 The structured game request also carries a compact canonical character card,
 relationship snapshot, notable current state, recent dialogue, and the
@@ -295,12 +304,14 @@ exact `(world_uuid, player_uuid, npc_uuid)` tuple, so NPCs, players, and saves
 cannot bleed into one another.
 
 The store has a single shared `memories` table rather than NPC-specific tables,
-conversation sessions/turns, commitments, provenance, and indexes. It uses
-SQLite FTS5 when available and falls back to bounded token matching when it is
-not. Retrieval is deliberately small and deterministic: recent turns are
-bounded, active commitments are always considered, and relevant memories are
-ranked before prompt assembly. Embeddings and vector extensions are not
-required by this foundation.
+conversation sessions/turns, commitments, provenance, and indexes. Canonical
+turns retain a stable message ID plus Project Zomboid game-day/world-age
+fields; duplicate bridge deliveries are ignored. It uses SQLite FTS5 when
+available and falls back to bounded token matching when it is not. Retrieval is
+deliberately small and deterministic: recent turns are bounded, active
+commitments are always considered, and relevant memories plus a small recall
+window from older transcript turns are selected before prompt assembly.
+Embeddings and vector extensions are not required by this foundation.
 
 Memory writes are failure-contained: a database problem is logged and the
 provider request continues without memory. Consolidation runs at the configured

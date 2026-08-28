@@ -6,6 +6,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pbrainz.branding import PRODUCT_NAME
+from pbrainz.paths import default_zomboid_path
 
 OPENAI_COMPATIBLE_PROVIDERS = ("openai", "ollama", "lmstudio", "custom")
 PROVIDER_DEFAULT_BASE_URLS = {
@@ -42,6 +43,7 @@ class Settings(BaseSettings):
     bridge_required: bool = True
     bridge_root: str | None = None
     bridge_config_path: str | None = None
+    zomboid_path: str = Field(default_factory=lambda: str(default_zomboid_path()))
     bridge_poll_interval: float = Field(default=0.5, gt=0.05, le=10)
     open_gui: bool = True
     auto_refresh_models: bool = False
@@ -52,7 +54,12 @@ class Settings(BaseSettings):
     memory_recent_turns: int = Field(default=8, ge=1, le=32)
     memory_retrieval_limit: int = Field(default=6, ge=1, le=16)
     memory_consolidation_turns: int = Field(default=12, ge=2, le=100)
+    memory_rag_enabled: bool = True
+    tool_rag_enabled: bool = True
+    tool_retrieval_limit: int = Field(default=8, ge=1, le=32)
+    tool_budget_chars: int = Field(default=2600, ge=400, le=20000)
     llm_diagnostics: bool = False
+    llm_trace_capture: bool = False
 
     # TTS is a local presentation enhancement.  It is deliberately disabled
     # by default and has no bearing on provider, memory, or gameplay calls.
@@ -164,4 +171,7 @@ def get_settings() -> Settings:
     settings = Settings(**values)
     if not stored:
         database.save_settings(settings.model_dump())
+    elif "zomboid_path" not in stored:
+        # Backfill the new path setting for databases created by older builds.
+        database.save_settings({"zomboid_path": settings.zomboid_path})
     return settings

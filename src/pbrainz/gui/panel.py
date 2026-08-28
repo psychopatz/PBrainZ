@@ -11,7 +11,9 @@ from pbrainz.branding import PRODUCT_BINARY_NAME, PRODUCT_NAME
 from .about_tab import AboutTab
 from .chat_tab import ChatTab
 from .control_tab import ControlTab
+from .debug_tab import DebugTab
 from .icons import load_icon
+from .memory_tab import MemoryTab
 from .request import ApiRequestRunner, RequestFailure, RequestSuccess
 from .settings_tab import SettingsTab
 from .state import PanelState
@@ -42,6 +44,8 @@ class PBrainZControlPanel:
         self._chat_selection_generation = 0
         self.control_tab: ControlTab
         self.chat_tab: ChatTab
+        self.memory_tab: MemoryTab
+        self.debug_tab: DebugTab
         self.tts_tab: TTSTab
         self.about_tab: AboutTab
         self.settings_tab: SettingsTab
@@ -63,6 +67,10 @@ class PBrainZControlPanel:
         control_frame = frames["control"]
         settings_frame = frames["settings"]
         chat_frame = frames["chat"]
+        memory_frame = frames["memory"]
+        self._memory_frame = memory_frame
+        debug_frame = frames["debug"]
+        self._debug_frame = debug_frame
         tts_frame = frames["tts"]
         about_frame = frames["about"]
 
@@ -87,8 +95,25 @@ class PBrainZControlPanel:
             self._provider_request_timeout,
             self.save_chat_selection,
         )
+        self.memory_tab = MemoryTab(
+            memory_frame,
+            self._run_request,
+            self._provider_request_timeout,
+        )
+        self.debug_tab = DebugTab(
+            debug_frame,
+            self._run_request,
+            self._provider_request_timeout,
+        )
         self.tts_tab = TTSTab(tts_frame, self._run_request)
         self.about_tab = AboutTab(about_frame, brand_icon=self._brand_icon)
+        self.notebook.bind("<<NotebookTabChanged>>", self._tab_changed)
+
+    def _tab_changed(self, _event: object | None = None) -> None:
+        if self.notebook.select() == str(self._memory_frame):
+            self.memory_tab.refresh()
+        elif self.notebook.select() == str(self._debug_frame):
+            self.debug_tab.refresh()
 
     def _set_window_icon(self) -> None:
         self._window_icon = load_icon(self.root, "pbrainz.png")
@@ -205,6 +230,8 @@ class PBrainZControlPanel:
             log_view=log_view,
             chat_view=text_widgets[0],
             chat_input=text_widgets[1],
+            memory_detail=getattr(self.memory_tab, "detail_view", None),
+            debug_detail=getattr(self.debug_tab, "detail_view", None),
         )
 
     def _apply_status(self, data: dict[str, Any], success_message: str | None = None) -> None:
@@ -224,6 +251,9 @@ class PBrainZControlPanel:
                 self._set_if_changed(
                     self.state.poll_interval, str(data.get("bridge_poll_interval", 0.5))
                 )
+                zomboid_path = data.get("zomboid_path")
+                if zomboid_path:
+                    self._set_if_changed(self.state.zomboid_path, str(zomboid_path))
                 self._set_if_changed(self.state.theme, data.get("ui_theme") or "light")
                 self._apply_theme(self.state.theme.get())
         finally:

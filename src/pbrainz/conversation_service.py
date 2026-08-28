@@ -4,26 +4,35 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
-from pbrainz.api.models import ChatCompletionRequest
+from pbrainz.api.models import ChatCompletionRequest, ChatMessage
 from pbrainz.config import Settings
 from pbrainz.context_builder import ContextBuilder, ContextInput
 from pbrainz.memory import (
     ConversationTurn,
+    DaySynopsis,
+    MemoryEpisode,
+    MemoryQuery,
     MemoryRecord,
     MemoryScope,
     MemoryType,
+    MemoryVisibility,
     RetrievalMatch,
     SQLiteMemoryStore,
+    StructuredFact,
+    TurnWriteResult,
+    memory_root_for_settings,
 )
 from pbrainz.providers.base import CompletionResult
 from pbrainz.providers.registry import ProviderRegistry
 
 LOGGER = logging.getLogger(__name__)
+TraceWriter = Callable[..., None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +43,19 @@ class ConversationRequest:
     scope: MemoryScope
     session_id: str
     message: str
+    message_id: str | None = None
     npc_name: str = "the survivor"
     player_name: str = "the player"
     character_card: dict[str, Any] = field(default_factory=dict)
     relationship_snapshot: dict[str, Any] = field(default_factory=dict)
     preferences: dict[str, Any] = field(default_factory=dict)
     current_state: dict[str, Any] = field(default_factory=dict)
+    scene: dict[str, Any] = field(default_factory=dict)
+    participants: tuple[dict[str, Any], ...] = ()
+    current_topic: str | None = None
+    mentioned_entities: tuple[str, ...] = ()
+    game_day: int | None = None
+    world_age_hours: float | None = None
     recent_conversation: tuple[dict[str, str], ...] = ()
     available_tools: tuple[dict[str, Any], ...] = ()
     provider: str | None = None
@@ -66,6 +82,12 @@ class ConversationRequest:
         request_id = str(
             value.get("request_id") or context.get("request_id") or uuid.uuid4().hex
         )
+        message_id = _optional_text(
+            value.get("message_id")
+            or value.get("messageID")
+            or context.get("message_id")
+            or context.get("messageID")
+        )
         session_id = str(
             context.get("session_id")
             or context.get("sessionID")
@@ -76,6 +98,7 @@ class ConversationRequest:
             scope=MemoryScope(str(world_uuid), str(player_uuid), str(npc_uuid)),
             session_id=session_id,
             message=str(message).strip()[:4000],
+            message_id=message_id,
             npc_name=str(context.get("npc_name") or context.get("npcName") or "the survivor"),
             player_name=str(
                 context.get("player_name")
@@ -89,6 +112,30 @@ class ConversationRequest:
             ),
             preferences=_mapping(context.get("preferences")),
             current_state=_mapping(context.get("current_state") or context.get("currentState")),
+            scene=_mapping(context.get("scene") or context.get("scene_context")),
+            participants=_participants(context.get("participants")),
+            current_topic=_optional_text(
+                context.get("current_topic") or context.get("currentTopic")
+            ),
+            mentioned_entities=tuple(
+                str(item).strip()[:128]
+                for item in (
+                    context.get("mentioned_entities")
+                    or context.get("mentionedEntities")
+                    or []
+                )
+                if str(item).strip()
+            )[:16],
+            game_day=_optional_int(
+                context,
+                "game_day",
+                "gameDay",
+            ),
+            world_age_hours=_optional_float(
+                context,
+                "world_age_hours",
+                "worldAgeHours",
+            ),
             recent_conversation=tuple(
                 {
                     "role": str(item.get("role") or "assistant"),
@@ -200,6 +247,7 @@ class ConversationService:
         providers: ProviderRegistry,
         *,
         consolidator: ConversationConsolidator | None = None,
+        trace_writer: TraceWriter | None = None,
     ) -> None:
         self.settings = settings
         self.providers = providers
@@ -207,11 +255,77 @@ class ConversationService:
             max_chars=settings.context_max_chars,
             recent_turn_limit=settings.memory_recent_turns,
             memory_limit=settings.memory_retrieval_limit,
+            tool_rag_enabled=settings.tool_rag_enabled,
+            tool_limit=settings.tool_retrieval_limit,
+            tool_budget_chars=settings.tool_budget_chars,
         )
         self.consolidator = consolidator or HeuristicConsolidator()
         self._stores: dict[str, SQLiteMemoryStore] = {}
+        self._trace_writer = trace_writer
+
+    def debug_trace_enabled(self) -> bool:
+        """Return whether full diagnostic payload construction is active."""
+        return self.settings.llm_trace_capture and self._trace_writer is not None
+
+    def record_debug_trace(
+        self,
+        phase: str,
+        payload: object,
+        *,
+        request_id: str = "",
+        npc_id: str = "",
+        session_id: str = "",
+        source: str = "pbrainz",
+    ) -> None:
+        """Write opt-in diagnostics without serializing payloads when disabled."""
+        if not self.debug_trace_enabled():
+            return
+        try:
+            self._trace_writer(
+                source=source,
+                phase=phase,
+                request_id=request_id,
+                npc_id=npc_id,
+                session_id=session_id,
+                payload=payload,
+            )
+        except Exception as error:  # Diagnostics must never break gameplay.
+            LOGGER.warning("LLM trace write failed: %s", error)
 
     async def complete(self, request: ConversationRequest) -> ConversationResult:
+        if self.debug_trace_enabled():
+            self.record_debug_trace(
+                "conversation.input",
+                {
+                    "scope": {
+                        "world_uuid": request.scope.world_uuid,
+                        "player_uuid": request.scope.player_uuid,
+                        "npc_uuid": request.scope.npc_uuid,
+                    },
+                    "session_id": request.session_id,
+                    "message": request.message,
+                    "npc_name": request.npc_name,
+                    "player_name": request.player_name,
+                    "character_card": request.character_card,
+                    "relationship_snapshot": request.relationship_snapshot,
+                    "preferences": request.preferences,
+                    "current_state": request.current_state,
+                    "scene": request.scene,
+                    "participants": request.participants,
+                    "current_topic": request.current_topic,
+                    "mentioned_entities": request.mentioned_entities,
+                    "game_day": request.game_day,
+                    "world_age_hours": request.world_age_hours,
+                    "recent_conversation": request.recent_conversation,
+                    "available_tools": request.available_tools,
+                    "provider": request.provider,
+                    "model": request.model,
+                },
+                request_id=request.request_id,
+                npc_id=request.scope.npc_uuid,
+                session_id=request.session_id,
+                source="pbrainz.conversation",
+            )
         store = self._store(request.scope.world_uuid)
         diagnostics: dict[str, Any] = {
             "world_uuid": request.scope.world_uuid,
@@ -221,8 +335,14 @@ class ConversationService:
             "memory_enabled": True,
         }
         recent: list[ConversationTurn] = []
+        recalled: list[ConversationTurn] = []
         matches: list[RetrievalMatch] = []
+        day_synopsis: DaySynopsis | None = None
+        structured_facts: list[StructuredFact] = []
         session_turn_count = 0
+        retrieval_needed = (
+            self.settings.memory_rag_enabled and retrieval_needed_for(request.message)
+        )
         try:
             session = store.ensure_session(request.session_id, request.scope, request.metadata)
             session_turn_count = session.turn_count
@@ -231,27 +351,78 @@ class ConversationService:
                 request.scope,
                 settings_limit(self.settings.memory_recent_turns),
             )
+            if retrieval_needed:
+                recalled = store.search_turns(
+                    request.scope,
+                    request.message,
+                    limit=settings_limit(self.settings.memory_recent_turns // 2),
+                )
+                recent_ids = {
+                    turn.message_id for turn in recent if turn.message_id is not None
+                }
+                recalled = [
+                    turn
+                    for turn in recalled
+                    if turn.message_id is None or turn.message_id not in recent_ids
+                ]
             if not recent:
                 recent = [
                     ConversationTurn(role=item["role"], content=item["content"])
                     for item in request.recent_conversation
                 ]
-            store.add_turn(
+            store.record_turn(
                 request.session_id,
                 request.scope,
                 "user",
                 request.message,
-                {"source": "project-hoomans", "request_id": request.request_id},
+                message_id=request.message_id or f"llm-input:{request.request_id}",
+                metadata={
+                    "source": "project-hoomans",
+                    "request_id": request.request_id,
+                    "canonical_message_id": request.message_id,
+                    "visibility": MemoryVisibility.PUBLIC.value,
+                    "participants": [
+                        str(item.get("id"))
+                        for item in request.participants
+                        if item.get("id")
+                    ],
+                },
+                game_day=request.game_day,
+                world_age_hours=request.world_age_hours,
+                speaker_uuid=request.scope.player_uuid,
+                speaker_name=request.player_name,
+                speaker_kind="player",
             )
-            matches = store.retrieve(
-                request.scope,
-                request.message,
-                limit=settings_limit(self.settings.memory_retrieval_limit),
+            query = MemoryQuery(
+                scope=request.scope,
+                actor_id=request.scope.npc_uuid,
+                current_message=request.message,
+                conversation_id=request.session_id,
+                current_day=request.game_day,
+                participants=tuple(
+                    str(item.get("id"))
+                    for item in request.participants
+                    if item.get("id")
+                ),
+                mentioned_entities=request.mentioned_entities,
+                current_topic=request.current_topic,
+                max_results=settings_limit(self.settings.memory_retrieval_limit),
+                token_budget=max(200, self.settings.memory_retrieval_limit * 120),
             )
+            if retrieval_needed:
+                matches = store.retrieve_query(query)
+            if request.game_day is not None:
+                day_synopsis = store.get_day_synopsis(request.scope, request.game_day)
+            structured_facts = store.list_structured_facts(query, limit=12)
             diagnostics.update(
                 {
                     "memory_path": str(store.path),
                     "recent_turn_count": len(recent),
+                    "recalled_turn_count": len(recalled),
+                    "retrieval_needed": retrieval_needed,
+                    "retrieval_skipped": not retrieval_needed,
+                    "day_synopsis_available": day_synopsis is not None,
+                    "structured_fact_count": len(structured_facts),
                     "memory_count": store.stats().get("memory_count", 0),
                     "retrieved_memories": [match.as_diagnostic() for match in matches],
                 }
@@ -260,6 +431,7 @@ class ConversationService:
             diagnostics.update({"memory_enabled": False, "memory_error": type(error).__name__})
             LOGGER.warning("NPC memory unavailable; continuing without it: %s", error)
 
+        context_started = time.perf_counter() if self.debug_trace_enabled() else None
         built = self.context_builder.build(
             ContextInput(
                 npc_name=request.npc_name,
@@ -268,12 +440,25 @@ class ConversationService:
                 relationship_snapshot=request.relationship_snapshot,
                 preferences=request.preferences,
                 current_state=request.current_state,
+                scene=request.scene,
+                day_synopsis=day_synopsis.synopsis if day_synopsis else "",
+                structured_facts=tuple(
+                    {
+                        "kind": fact.kind,
+                        "content": fact.content,
+                        "truth_status": fact.truth_status,
+                        "game_day": fact.game_day,
+                    }
+                    for fact in structured_facts
+                ),
                 retrieved_memories=tuple(matches),
+                recalled_turns=tuple(recalled),
                 recent_turns=tuple(recent),
                 available_tools=request.available_tools,
                 current_message=request.message,
             )
         )
+        context_build_ms = _elapsed_ms(context_started)
         provider_name, model_name = self.providers.resolve(request.provider, request.model)
         provider_request = ChatCompletionRequest(
             model=model_name,
@@ -284,56 +469,312 @@ class ConversationService:
             tools=built.tools or None,
             metadata={"source": "project-hoomans", "npc_uuid": request.scope.npc_uuid},
         )
-        result = await self.providers.complete(provider_name, provider_request)
+        if self.debug_trace_enabled():
+            self.record_debug_trace(
+                "provider.request",
+                {
+                    "attempt": 1,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "messages": [
+                        message.model_dump(exclude_none=True) for message in built.messages
+                    ],
+                    "tools": built.tools,
+                    "context_diagnostics": built.diagnostics,
+                    "context_build_ms": context_build_ms,
+                },
+                request_id=request.request_id,
+                npc_id=request.scope.npc_uuid,
+                session_id=request.session_id,
+                source="pbrainz.provider",
+            )
+        provider_started = time.perf_counter() if self.debug_trace_enabled() else None
+        try:
+            result = await self.providers.complete(provider_name, provider_request)
+        except Exception as error:
+            if self.debug_trace_enabled():
+                self.record_debug_trace(
+                    "provider.error",
+                    {
+                        "attempt": 1,
+                        "error_type": type(error).__name__,
+                        "message": str(error),
+                        "latency_ms": _elapsed_ms(provider_started),
+                    },
+                    request_id=request.request_id,
+                    npc_id=request.scope.npc_uuid,
+                    session_id=request.session_id,
+                    source="pbrainz.provider",
+                )
+            raise
+        if self.debug_trace_enabled():
+            self.record_debug_trace(
+                "provider.response",
+                _completion_trace_payload(
+                    result,
+                    attempt=1,
+                    latency_ms=_elapsed_ms(provider_started),
+                    context_build_ms=context_build_ms,
+                ),
+                request_id=request.request_id,
+                npc_id=request.scope.npc_uuid,
+                session_id=request.session_id,
+                source="pbrainz.provider",
+            )
+        # Some providers can return a structurally valid response with no text
+        # (for example a safety-filtered result or a tool-only candidate).  Make
+        # one bounded text-only retry when the candidate contains no tool call,
+        # or only tool calls that were not among the declarations sent to the
+        # provider.  An authorized tool-only candidate is intentional and must
+        # reach the game unchanged.
+        initial_tool_calls = list(result.tool_calls or [])
+        initial_authorized_tool_calls = _authorized_tool_call_count(
+            initial_tool_calls, built.tools
+        )
+        result_text = str(result.text or "").strip()
+        should_retry_empty = (
+            not result_text
+            and bool(built.tools)
+            and (
+                not initial_tool_calls
+                or initial_authorized_tool_calls == 0
+            )
+        )
+        if should_retry_empty:
+            retry_system = (built.messages[0].content or "").rstrip()
+            retry_system += (
+                "\n\nReturn a spoken NPC reply for this turn. Do not call tools; "
+                "write the reply as plain dialogue text."
+            )
+            retry_messages = list(built.messages)
+            retry_messages[0] = ChatMessage(role="system", content=retry_system)
+            retry_request = provider_request.model_copy(
+                update={"messages": retry_messages, "tools": None}
+            )
+            diagnostics["empty_response_retry"] = (
+                "text_only_unrecognized_tools"
+                if initial_tool_calls
+                else "text_only"
+            )
+            if self.debug_trace_enabled():
+                self.record_debug_trace(
+                    "provider.request",
+                    {
+                        "attempt": 2,
+                        "reason": diagnostics["empty_response_retry"],
+                        "provider": provider_name,
+                        "model": model_name,
+                        "messages": [
+                            message.model_dump(exclude_none=True)
+                            for message in retry_messages
+                        ],
+                        "tools": None,
+                    },
+                    request_id=request.request_id,
+                    npc_id=request.scope.npc_uuid,
+                    session_id=request.session_id,
+                    source="pbrainz.provider",
+                )
+            retry_started = time.perf_counter() if self.debug_trace_enabled() else None
+            try:
+                result = await self.providers.complete(provider_name, retry_request)
+            except Exception as error:
+                if self.debug_trace_enabled():
+                    self.record_debug_trace(
+                        "provider.error",
+                        {
+                            "attempt": 2,
+                            "error_type": type(error).__name__,
+                            "message": str(error),
+                            "latency_ms": _elapsed_ms(retry_started),
+                        },
+                        request_id=request.request_id,
+                        npc_id=request.scope.npc_uuid,
+                        session_id=request.session_id,
+                        source="pbrainz.provider",
+                    )
+                raise
+            if self.debug_trace_enabled():
+                self.record_debug_trace(
+                    "provider.response",
+                    _completion_trace_payload(
+                        result,
+                        attempt=2,
+                        latency_ms=_elapsed_ms(retry_started),
+                        context_build_ms=context_build_ms,
+                    ),
+                    request_id=request.request_id,
+                    npc_id=request.scope.npc_uuid,
+                    session_id=request.session_id,
+                    source="pbrainz.provider",
+                )
+            result_text = str(result.text or "").strip()
         diagnostics.update(
             {
                 "provider": provider_name,
                 "model": model_name,
                 "context": built.diagnostics,
                 "context_message_count": len(built.messages),
+                "finish_reason": result.finish_reason or "unknown",
+                "tool_call_count": len(result.tool_calls or []),
+                "provider_tool_call_count": len(initial_tool_calls),
+                "provider_authorized_tool_call_count": initial_authorized_tool_calls,
+                "reasoning_available": bool(result.reasoning),
             }
         )
+        if result.usage and result.usage.as_dict():
+            diagnostics["usage"] = result.usage.as_dict()
 
         try:
-            store.add_turn(
-                request.session_id,
-                request.scope,
-                "assistant",
-                result.text,
-                {"source": "provider", "provider": provider_name, "model": model_name},
-            )
-            current_count = session_turn_count + 2
-            should_consolidate = request.end_session or (
-                current_count >= self.settings.memory_consolidation_turns
-                and current_count % self.settings.memory_consolidation_turns == 0
-            )
-            if should_consolidate:
-                self._consolidate(store, request)
-                diagnostics["consolidated"] = True
+            if result_text:
+                store.record_turn(
+                    request.session_id,
+                    request.scope,
+                    "assistant",
+                    result_text,
+                    message_id=f"llm-response:{request.request_id}",
+                    metadata={
+                        "source": "provider",
+                        "provider": provider_name,
+                        "model": model_name,
+                        "visibility": MemoryVisibility.PUBLIC.value,
+                        "participants": [
+                            str(item.get("id"))
+                            for item in request.participants
+                            if item.get("id")
+                        ],
+                    },
+                    game_day=request.game_day,
+                    world_age_hours=request.world_age_hours,
+                    speaker_uuid=request.scope.npc_uuid,
+                    speaker_name=request.npc_name,
+                    speaker_kind="npc",
+                )
+                current_count = session_turn_count + 2
+                consolidation_threshold = max(
+                    1, int(self.settings.memory_consolidation_turns)
+                )
+                should_consolidate = request.end_session or (
+                    current_count >= consolidation_threshold
+                    and session_turn_count // consolidation_threshold
+                    < current_count // consolidation_threshold
+                )
+                if should_consolidate:
+                    self._consolidate(store, request)
+                    diagnostics["consolidated"] = True
+                    stats = store.stats()
+                    for key in (
+                        "memory_count",
+                        "episode_count",
+                        "fact_count",
+                    ):
+                        diagnostics[key] = stats[key]
+                else:
+                    diagnostics["consolidated"] = False
             else:
-                diagnostics["consolidated"] = False
+                diagnostics["empty_response"] = True
+                LOGGER.warning(
+                    "NPC provider returned no dialogue text provider=%s model=%s "
+                    "finish_reason=%s tool_calls=%s",
+                    provider_name,
+                    model_name,
+                    result.finish_reason or "unknown",
+                    len(result.tool_calls or []),
+                )
         except Exception as error:  # The response must not depend on persistence.
             diagnostics["memory_write_error"] = type(error).__name__
             LOGGER.warning("NPC memory write failed after completion: %s", error)
         return ConversationResult(result, request.session_id, tuple(matches), diagnostics)
 
+    def record_message(self, message: dict[str, Any]) -> TurnWriteResult:
+        """Persist one canonical game message and make retries harmless."""
+        if not isinstance(message, dict):
+            raise ValueError("conversation sync message must be an object")
+        world_uuid = _text_value(message, "world_uuid", "worldUUID", "save_uuid", "saveUUID")
+        player_uuid = _text_value(message, "player_uuid", "playerUUID")
+        npc_uuid = _text_value(message, "npc_uuid", "npcUUID")
+        message_id = _text_value(message, "message_id", "messageID", "event_id", "eventID")
+        conversation_id = _text_value(
+            message, "conversation_id", "conversationID", "session_id", "sessionID"
+        )
+        content = _text_value(message, "text", "content")
+        if not all((world_uuid, player_uuid, npc_uuid, message_id, conversation_id, content)):
+            raise ValueError(
+                "conversation sync messages require world, player, NPC, message ID, "
+                "conversation ID, and text"
+            )
+        scope = MemoryScope(world_uuid, player_uuid, npc_uuid)
+        source = message.get("source")
+        metadata: dict[str, Any] = {
+            "source": "project-hoomans-sync",
+            "conversation_id": conversation_id,
+        }
+        namespace = _optional_text(message.get("namespace"))
+        if namespace:
+            metadata["namespace"] = namespace
+        if isinstance(source, dict):
+            metadata["event_source"] = source
+        participants = message.get("participants")
+        if isinstance(participants, list):
+            metadata["participants"] = participants[:16]
+        speaker_kind = _text_value(message, "speaker_kind", "speakerKind")
+        role = "user" if speaker_kind == "player" else "assistant"
+        store = self._store(world_uuid)
+        store.ensure_session(
+            conversation_id,
+            scope,
+            {"source": "project-hoomans-sync", "conversation_id": conversation_id},
+        )
+        return store.record_turn(
+            conversation_id,
+            scope,
+            role,
+            content,
+            message_id=message_id,
+            metadata=metadata,
+            game_day=_optional_int(message, "game_day", "gameDay"),
+            world_age_hours=_optional_float(message, "world_age_hours", "worldAgeHours"),
+            speaker_uuid=_optional_text(
+                message.get("speaker_uuid") or message.get("speakerID")
+            ),
+            speaker_name=_optional_text(
+                message.get("speaker_name") or message.get("speakerName")
+            ),
+            speaker_kind=speaker_kind,
+        )
+
+    def record_message_batch(self, batch: dict[str, Any]) -> tuple[str, ...]:
+        """Record valid outbox entries and return only IDs safe to acknowledge."""
+        if not isinstance(batch, dict):
+            raise ValueError("conversation sync batch must be an object")
+        messages = batch.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("conversation sync batch messages must be a list")
+        acknowledged: list[str] = []
+        for message in messages:
+            try:
+                result = self.record_message(message)
+            except ValueError as error:
+                LOGGER.warning("Skipping invalid conversation sync message: %s", error)
+                continue
+            acknowledged.append(result.turn.message_id or "")
+        return tuple(message_id for message_id in acknowledged if message_id)
+
     def _store(self, world_uuid: str) -> SQLiteMemoryStore:
         if world_uuid not in self._stores:
-            root = self.settings.memory_root
-            if root:
-                memory_root = Path(root).expanduser()
-            else:
-                database_path = self.settings.database_path
-                if database_path:
-                    memory_root = Path(database_path).expanduser().parent / "memory"
-                else:
-                    memory_root = Path.home() / ".config" / "PBrainZ" / "memory"
-            self._stores[world_uuid] = SQLiteMemoryStore(memory_root, world_uuid)
+            self._stores[world_uuid] = SQLiteMemoryStore(
+                memory_root_for_settings(self.settings), world_uuid
+            )
         return self._stores[world_uuid]
 
     def _consolidate(self, store: SQLiteMemoryStore, request: ConversationRequest) -> None:
         turns = store.recent_turns(request.session_id, request.scope, limit=24)
         result = self.consolidator.consolidate(request.scope, request.session_id, turns)
+        participant_ids = _participant_ids(request)
+        game_day = request.game_day
+        if game_day is None:
+            dated_turns = [turn.game_day for turn in turns if turn.game_day is not None]
+            game_day = dated_turns[-1] if dated_turns else None
         if result.summary:
             store.set_summary(request.session_id, request.scope, result.summary)
             store.remember(
@@ -347,11 +788,56 @@ class ConversationService:
                     provenance={
                         "source": "conversation_consolidation",
                         "session_id": request.session_id,
+                        "participants": participant_ids,
                     },
                     session_id=request.session_id,
+                    visibility=MemoryVisibility.PUBLIC,
+                    game_day=game_day,
+                    participants=participant_ids,
+                    topic_tags=((request.current_topic,) if request.current_topic else ()),
+                    transcript_ref=request.session_id,
+                )
+            )
+            store.remember_episode(
+                MemoryEpisode(
+                    episode_id=f"episode:{request.session_id}:{game_day or 0}",
+                    scope=request.scope,
+                    conversation_id=request.session_id,
+                    game_day=game_day,
+                    participants=participant_ids,
+                    witnesses=participant_ids,
+                    topic_tags=((request.current_topic,) if request.current_topic else ()),
+                    summary=result.summary,
+                    key_facts=tuple(memory.content for memory in result.memories[:8]),
+                    importance=0.65,
+                    visibility=MemoryVisibility.PUBLIC,
+                    transcript_ref=request.session_id,
                 )
             )
         for memory in result.memories:
+            memory = MemoryRecord(
+                memory_id=memory.memory_id,
+                scope=memory.scope,
+                memory_type=memory.memory_type,
+                content=memory.content,
+                tags=memory.tags,
+                importance=memory.importance,
+                state=memory.state,
+                provenance={
+                    **memory.provenance,
+                    "participants": participant_ids,
+                    "truth_status": (
+                        "unverified"
+                        if memory.memory_type in {MemoryType.CLAIM, MemoryType.HEARSAY}
+                        else "stated"
+                    ),
+                },
+                session_id=memory.session_id,
+                game_day=game_day,
+                visibility=MemoryVisibility.PUBLIC,
+                participants=participant_ids,
+                transcript_ref=request.session_id,
+            )
             if memory.memory_type is MemoryType.COMMITMENT:
                 store.add_commitment(
                     request.scope,
@@ -363,8 +849,142 @@ class ConversationService:
                 )
             else:
                 store.remember(memory)
+            store.save_structured_fact(
+                StructuredFact(
+                    fact_id=f"fact:{request.session_id}:{memory.memory_id}",
+                    scope=request.scope,
+                    kind=memory.memory_type.value,
+                    content=memory.content,
+                    source_uuid=request.scope.player_uuid,
+                    truth_status=memory.provenance.get("truth_status", "stated"),
+                    visibility=MemoryVisibility.PUBLIC,
+                    game_day=game_day,
+                    importance=memory.importance,
+                    provenance=memory.provenance,
+                    conversation_id=request.session_id,
+                )
+            )
+        if result.summary and game_day is not None:
+            previous = store.get_day_synopsis(request.scope, game_day)
+            summary_lines = [
+                line.strip() for line in result.summary.splitlines() if line.strip()
+            ]
+            prior_lines = previous.synopsis.splitlines() if previous else []
+            merged_lines = list(dict.fromkeys(prior_lines + summary_lines))[-12:]
+            commitments = list(previous.commitments if previous else ())
+            claims = list(previous.claims if previous else ())
+            for memory in result.memories:
+                if memory.memory_type is MemoryType.COMMITMENT:
+                    commitments.append(memory.content)
+                elif memory.memory_type in {MemoryType.CLAIM, MemoryType.HEARSAY}:
+                    claims.append(memory.content)
+            store.save_day_synopsis(
+                DaySynopsis(
+                    scope=request.scope,
+                    game_day=game_day,
+                    synopsis="\n".join(dict.fromkeys(merged_lines))[-2400:],
+                    commitments=tuple(dict.fromkeys(commitments))[-16:],
+                    claims=tuple(dict.fromkeys(claims))[-16:],
+                    unresolved_topics=tuple(
+                        [request.current_topic] if request.current_topic else ()
+                    ),
+                )
+            )
         if request.end_session:
             store.end_session(request.session_id, request.scope, result.summary)
+
+
+_HISTORICAL_CUES = re.compile(
+    r"\b(remember|yesterday|earlier|before|last|morning|afternoon|said|told|"
+    r"happened|trust|trusted|promise|promised|agreed|again|what did|why do you)\b",
+    re.I,
+)
+
+
+def retrieval_needed_for(message: str) -> bool:
+    """Cheap gate: keep historical RAG off the path for ordinary chatter."""
+    normalized = " ".join(str(message or "").split())
+    if not normalized:
+        return False
+    return bool(_HISTORICAL_CUES.search(normalized))
+
+
+def _tool_name(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    function = value.get("function")
+    if not isinstance(function, dict):
+        function = value
+    return str(function.get("name") or "").strip()
+
+
+def _authorized_tool_call_count(
+    tool_calls: list[dict[str, Any]],
+    exposed_tools: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> int:
+    exposed = {_tool_name(tool) for tool in exposed_tools}
+    exposed.discard("")
+    return sum(1 for call in tool_calls if _tool_name(call) in exposed)
+
+
+def _elapsed_ms(start: float | None) -> float | None:
+    if start is None:
+        return None
+    return round((time.perf_counter() - start) * 1000, 2)
+
+
+def _completion_trace_payload(
+    result: CompletionResult,
+    *,
+    attempt: int,
+    latency_ms: float | None = None,
+    context_build_ms: float | None = None,
+) -> dict[str, Any]:
+    """Expose provider-returned diagnostics without requesting hidden reasoning."""
+    return {
+        "attempt": attempt,
+        "model": result.model,
+        "text": result.text,
+        "finish_reason": result.finish_reason,
+        "tool_calls": result.tool_calls,
+        "reasoning": result.reasoning,
+        "usage": result.usage.as_dict() if result.usage else None,
+        "latency_ms": latency_ms,
+        "context_build_ms": context_build_ms,
+    }
+
+
+def _participants(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value[:16]:
+        if isinstance(item, dict):
+            participant = {
+                key: item[key]
+                for key in ("id", "name", "kind", "role", "active")
+                if item.get(key) is not None
+            }
+        else:
+            participant = {"id": str(item)}
+        participant_id = _optional_text(
+            participant.get("id") or participant.get("speakerID")
+        )
+        if not participant_id or participant_id in seen:
+            continue
+        participant["id"] = participant_id
+        seen.add(participant_id)
+        output.append(participant)
+    return tuple(output)
+
+
+def _participant_ids(request: ConversationRequest) -> tuple[str, ...]:
+    values = [request.scope.player_uuid, request.scope.npc_uuid]
+    values.extend(
+        str(item.get("id")) for item in request.participants if item.get("id")
+    )
+    return tuple(dict.fromkeys(value for value in values if value))
 
 
 def settings_limit(value: int) -> int:
@@ -378,3 +998,31 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _text_value(value: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        result = _optional_text(value.get(key))
+        if result:
+            return result
+    return ""
+
+
+def _optional_int(value: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if value.get(key) is not None:
+            try:
+                return int(value[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _optional_float(value: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if value.get(key) is not None:
+            try:
+                return float(value[key])
+            except (TypeError, ValueError):
+                return None
+    return None

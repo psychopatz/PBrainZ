@@ -76,6 +76,54 @@ class ChatCompletionResponse(BaseModel):
     usage: CompletionUsage | None = None
 
 
+class MockChatRequest(BaseModel):
+    """A panel-only request that exercises the structured NPC/RAG pipeline."""
+
+    provider: str | None = Field(default=None, min_length=1)
+    model: str = Field(default="default", min_length=1)
+    message: str = Field(min_length=1, max_length=12000)
+    world_uuid: str = Field(default="pbrainz-mock-world", min_length=1, max_length=256)
+    player_uuid: str = Field(default="mock-player", min_length=1, max_length=256)
+    npc_uuid: str = Field(default="mock-npc", min_length=1, max_length=256)
+    session_id: str | None = Field(default=None, max_length=256)
+    npc_name: str = Field(default="Mock NPC", max_length=128)
+    player_name: str = Field(default="Mock Player", max_length=128)
+    game_day: int | None = Field(default=1, ge=0)
+    world_age_hours: float | None = Field(default=None, ge=0)
+    current_topic: str | None = Field(default=None, max_length=256)
+    mentioned_entities: list[str] = Field(default_factory=list, max_length=16)
+    scene: dict[str, Any] = Field(default_factory=dict)
+    character_card: dict[str, Any] = Field(default_factory=dict)
+    relationship_snapshot: dict[str, Any] = Field(default_factory=dict)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    current_state: dict[str, Any] = Field(default_factory=dict)
+    participants: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    available_tools: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1)
+    end_session: bool = False
+
+
+class MemoryDeleteRequest(BaseModel):
+    """Identify one durable memory record for the local memory browser."""
+
+    world_uuid: str = Field(min_length=1, max_length=256)
+    record_kind: Literal["memory", "episode", "fact", "day_synopsis"]
+    record_id: str = Field(min_length=1, max_length=256)
+    player_uuid: str | None = Field(default=None, max_length=256)
+    npc_uuid: str | None = Field(default=None, max_length=256)
+    game_day: int | None = Field(default=None, ge=0)
+
+
+class MockChatSeedRequest(BaseModel):
+    """Identity fields for the panel's deterministic mock-memory fixture."""
+
+    world_uuid: str = Field(default="pbrainz-mock-world", min_length=1, max_length=256)
+    player_uuid: str = Field(default="mock-player", min_length=1, max_length=256)
+    npc_uuid: str = Field(default="mock-npc", min_length=1, max_length=256)
+    game_day: int = Field(default=1, ge=0)
+
+
 class DeltaMessage(BaseModel):
     role: Literal["assistant"] | None = None
     content: str | None = None
@@ -134,6 +182,7 @@ class UISettingsRequest(BaseModel):
     default_model: str | None = Field(default=None, min_length=1)
     request_timeout: float | None = Field(default=None, gt=0, le=600)
     bridge_poll_interval: float | None = Field(default=None, gt=0.05, le=10)
+    zomboid_path: str | None = Field(default=None, min_length=1)
     ui_theme: Literal["light", "dark"] | None = None
     openai_api_key: str | None = None
     gemini_api_key: str | None = None
@@ -188,6 +237,7 @@ class UIStatus(BaseModel):
     default_model: str | None = None
     request_timeout: float
     bridge_poll_interval: float
+    zomboid_path: str
     ui_theme: Literal["light", "dark"] = "light"
     providers: list[UIProviderStatus]
     openai_base_url: str
@@ -266,3 +316,9 @@ class UILogEntry(BaseModel):
 
 class UILogResponse(BaseModel):
     entries: list[UILogEntry]
+
+
+class UIDebugTraceSettingsRequest(BaseModel):
+    """Explicit opt-in switch for retaining full LLM diagnostics locally."""
+
+    enabled: bool

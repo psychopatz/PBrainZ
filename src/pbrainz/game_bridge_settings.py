@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+from pbrainz.paths import bridge_config_path_for
 
 CONFIG_FILENAME = "PsychopatzCore_Bridge.txt"
 
 
-def default_config_path() -> Path:
+def default_config_path(zomboid_path: str | Path | None = None) -> Path:
     """Return the cross-platform Project Zomboid bridge configuration path."""
 
-    configured = os.getenv("ZOMBOID_BRIDGE_CONFIG")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / "Zomboid" / "Lua" / CONFIG_FILENAME
+    return bridge_config_path_for(zomboid_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +66,24 @@ def parse_config(text: str) -> GameBridgeConfig:
 class GameBridgeSettings:
     """Persist the game bridge flag atomically without owning game runtime state."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path).expanduser() if path else default_config_path()
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        zomboid_path: str | Path | None = None,
+    ) -> None:
+        self._explicit_path = bool(path)
+        self.path = (
+            Path(path).expanduser()
+            if path
+            else default_config_path(zomboid_path)
+        )
+
+    def set_zomboid_path(self, zomboid_path: str | Path) -> None:
+        """Move the derived config path when no explicit override was supplied."""
+
+        if not self._explicit_path:
+            self.path = default_config_path(zomboid_path)
 
     def read(self) -> GameBridgeConfig:
         try:

@@ -38,6 +38,9 @@ class CompletionResult:
     finish_reason: str = "stop"
     usage: TokenUsage | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # Only provider-returned reasoning metadata is retained. The service never
+    # asks a model to disclose hidden chain-of-thought.
+    reasoning: str | None = None
 
 
 @dataclass(slots=True)

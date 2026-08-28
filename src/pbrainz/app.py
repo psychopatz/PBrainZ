@@ -11,6 +11,7 @@ from pbrainz.api.routes import router
 from pbrainz.branding import PRODUCT_NAME, PRODUCT_VERSION
 from pbrainz.bridge import BridgeController, BridgeRuntimeMonitor
 from pbrainz.config import Settings, get_settings
+from pbrainz.conversation_service import ConversationService
 from pbrainz.database import SettingsDatabase
 from pbrainz.exceptions import ProviderError
 from pbrainz.game_bridge_settings import GameBridgeSettings
@@ -48,11 +49,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app_settings.default_provider,
                 ),
             )
-        bridge = BridgeRuntimeMonitor(app_settings.bridge_root)
-        game_bridge_settings = GameBridgeSettings(app_settings.bridge_config_path)
+        bridge = BridgeRuntimeMonitor(
+            app_settings.bridge_root,
+            zomboid_path=app_settings.zomboid_path,
+        )
+        game_bridge_settings = GameBridgeSettings(
+            app_settings.bridge_config_path,
+            zomboid_path=app_settings.zomboid_path,
+        )
         app.state.settings = app_settings
         app.state.database = database
         app.state.providers = providers
+        # The native panel's mock chat uses the same structured conversation
+        # service as game traffic, but remains isolated from the bridge pump's
+        # lifecycle and from authoritative gameplay state.
+        app.state.conversation_service = ConversationService(
+            app_settings, providers, trace_writer=database.add_llm_trace
+        )
         app.state.bridge = bridge
         app.state.game_bridge_settings = game_bridge_settings
         catalog = ModelCatalogManager(app_settings, providers, database)
@@ -64,7 +77,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # route. Network discovery is deliberately manual so startup never
         # waits on unavailable local providers.
         app.state.model_refresh_task = None
-        controller = BridgeController(app_settings, providers, bridge, tts)
+        controller = BridgeController(
+            app_settings,
+            providers,
+            bridge,
+            tts,
+            trace_writer=database.add_llm_trace,
+        )
         app.state.bridge_controller = controller
         app.state.bridge_pump = None
         if controller.enabled:

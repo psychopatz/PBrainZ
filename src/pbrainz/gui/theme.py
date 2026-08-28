@@ -13,6 +13,8 @@ def apply_theme(
     log_view: tk.Text | None = None,
     chat_view: tk.Text | None = None,
     chat_input: tk.Text | None = None,
+    memory_detail: tk.Text | None = None,
+    debug_detail: tk.Text | None = None,
 ) -> str:
     """Apply the light/dark palette and return the normalized theme name."""
 
@@ -128,7 +130,7 @@ def apply_theme(
     root.option_add("*TCombobox*Listbox.selectBackground", active_background)
     root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
-    for widget in (log_view, chat_view, chat_input):
+    for widget in (log_view, chat_view, chat_input, memory_detail, debug_detail):
         if widget is not None:
             widget.configure(
                 background=field_background,

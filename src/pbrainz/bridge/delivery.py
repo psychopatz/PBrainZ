@@ -43,9 +43,25 @@ def _build_tts_utterance(
                 context.get("voice_binding") or context.get("voiceBinding")
             ),
         )
-        if not tts_service.can_synthesize(binding):
+        if binding is None:
+            LOGGER.warning(
+                "NPC TTS skipped npc=%s request=%s conversation=%s reason=voice_binding_missing",
+                npc_id,
+                request_id,
+                conversation_id,
+            )
             return None
-        return Utterance(
+        if not tts_service.can_synthesize(binding):
+            LOGGER.warning(
+                "NPC TTS skipped npc=%s request=%s conversation=%s reason=tts_unavailable "
+                "slot=%s",
+                npc_id,
+                request_id,
+                conversation_id,
+                binding.slot,
+            )
+            return None
+        utterance = Utterance(
             utterance_id=f"{conversation_id}:{request_id}",
             conversation_id=conversation_id,
             turn=int(context.get("turn") or 0),
@@ -53,6 +69,15 @@ def _build_tts_utterance(
             text=text[:MAX_DELIVERY_TEXT],
             voice_binding=binding,
         )
+        LOGGER.info(
+            "NPC TTS utterance prepared npc=%s request=%s conversation=%s slot=%s chars=%s",
+            npc_id,
+            request_id,
+            conversation_id,
+            binding.slot,
+            len(utterance.text),
+        )
+        return utterance
     except Exception as error:
         tts_service.last_error = f"TTS preparation failed: {error}"[:500]
         LOGGER.warning("TTS preparation failed; keeping the response text-only: %s", error)
