@@ -8,12 +8,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pbrainz.branding import PRODUCT_NAME
 from pbrainz.paths import default_zomboid_path
 
-OPENAI_COMPATIBLE_PROVIDERS = ("openai", "ollama", "lmstudio", "custom")
+OPENAI_COMPATIBLE_PROVIDERS = ("openai", "ollama", "lmstudio", "custom", "horde")
+NO_API_KEY_PROVIDERS = frozenset({"ollama", "lmstudio", "horde"})
 PROVIDER_DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "ollama": "http://127.0.0.1:11434/v1",
     "lmstudio": "http://127.0.0.1:1234/v1",
     "custom": "",
+    "horde": "https://oai.aihorde.net/v1",
 }
 
 
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
 
     default_provider: str = "openai"
     default_model: str | None = None
-    enabled_providers: str = "openai,ollama,lmstudio,custom,gemini"
+    enabled_providers: str = "openai,ollama,lmstudio,custom,horde,gemini"
     request_timeout: float = Field(default=120.0, gt=0)
     max_retries: int = Field(default=2, ge=0, le=10)
     bridge_required: bool = True
@@ -100,6 +102,13 @@ class Settings(BaseSettings):
     custom_base_url: str = ""
     custom_models: str = ""
 
+    # AI Horde's OpenAI-compatible gateway accepts the documented anonymous
+    # key when no personal key is configured. A personal key is optional and
+    # only changes request priority/quota behavior.
+    horde_api_key: str | None = None
+    horde_base_url: str = "https://oai.aihorde.net/v1"
+    horde_models: str = ""
+
     gemini_api_key: str | None = None
     gemini_models: str = "gemini-2.5-flash"
 
@@ -130,9 +139,9 @@ class Settings(BaseSettings):
             api_key = getattr(self, f"{name}_api_key", None)
             base_url = self.base_url_for(name).rstrip("/")
             default_url = PROVIDER_DEFAULT_BASE_URLS[name]
-            # Ollama and LM Studio normally have no API key; their configured
-            # localhost endpoints are enough to make the profile usable.
-            return bool(api_key or name in {"ollama", "lmstudio"} or base_url != default_url)
+            # Ollama, LM Studio, and Horde can operate without a personal API
+            # key; their configured endpoints are enough to make the profile usable.
+            return bool(api_key or name in NO_API_KEY_PROVIDERS or base_url != default_url)
         if name == "gemini":
             return bool(self.gemini_api_key)
         return False
@@ -142,7 +151,7 @@ class Settings(BaseSettings):
         name = provider_name.strip().lower()
         if not self.provider_configured(name):
             return False
-        if name in {"ollama", "lmstudio"}:
+        if name in NO_API_KEY_PROVIDERS:
             return bool(
                 getattr(self, f"{name}_api_key", None)
                 or self.base_url_for(name).rstrip("/") != PROVIDER_DEFAULT_BASE_URLS[name]
@@ -161,6 +170,24 @@ def get_settings() -> Settings:
     stored = database.load_settings()
     values = environment_settings.model_dump()
     values.update(stored)
+    stored_providers = stored.get("enabled_providers")
+    providers_migrated = (
+        isinstance(stored_providers, str)
+        and "horde" not in {
+            item.strip().casefold()
+            for item in stored_providers.split(",")
+            if item.strip()
+        }
+    )
+    if providers_migrated:
+        # Existing installations predate the built-in Horde profile. Preserve
+        # the user's other providers while making the new no-key profile
+        # visible after the normal settings migration.
+        values["enabled_providers"] = (
+            f"{stored_providers.strip().strip(',')},horde"
+            if stored_providers.strip().strip(",")
+            else "horde"
+        )
     # Branding is part of the executable, not a user-configurable setting.
     # Never resurrect the pre-rename HoomansLLM service name from an old local
     # settings row.
@@ -174,4 +201,6 @@ def get_settings() -> Settings:
     elif "zomboid_path" not in stored:
         # Backfill the new path setting for databases created by older builds.
         database.save_settings({"zomboid_path": settings.zomboid_path})
+    if providers_migrated:
+        database.save_settings({"enabled_providers": settings.enabled_providers})
     return settings

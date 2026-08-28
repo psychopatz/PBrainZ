@@ -168,6 +168,8 @@ important controls are:
 - separate LM Studio endpoint/API key (defaults to `http://127.0.0.1:1234/v1`);
 - separate Custom endpoint/API key (the endpoint is required; the key is
   optional);
+- AI Horde endpoint/API key (defaults to `https://oai.aihorde.net/v1`; the key
+  is optional and anonymous access is used when it is blank);
 - Gemini API key;
 - request timeout, bridge polling, and Project Hoomans bridge state.
 - light or dark control-panel theme.
@@ -190,11 +192,18 @@ builds keep a terminal attached so bridge state, NPC task messages, provider
 responses, and delivery errors are also visible while the GUI/server runs.
 Message previews are bounded and API keys are never logged.
 
-The OpenAI, Ollama, LM Studio, and Custom profiles use the OpenAI Chat
-Completions protocol. Ollama and LM Studio normally need no API key. The Custom
-profile accepts any user-defined OpenAI-compatible endpoint and does not
-require a key. Each profile has its own endpoint, credentials, model catalog,
-and selected model, so changing one does not change the others.
+The OpenAI, Ollama, LM Studio, Custom, and AI Horde profiles use the OpenAI Chat
+Completions protocol. Ollama and LM Studio normally need no API key. The Horde
+profile uses AI Horde's official OpenAI-compatible gateway and automatically
+uses its anonymous key when the optional key field is empty, so it can use
+community-hosted free models without local inference hardware or a paid API.
+Registering an AI Horde account and supplying its key can improve queue
+priority. The Custom profile accepts any user-defined OpenAI-compatible endpoint
+and does not require a key. Each profile has its own endpoint, credentials,
+model catalog, and selected model, so changing one does not change the others.
+The Horde OpenAI gateway is text-completion focused and does not provide native
+function/tool calling; P BrainZ therefore omits unsupported tool fields for
+Horde requests and falls back to ordinary dialogue generation.
 `OPENAI_BASE_URL` remains available for OpenAI Cloud during environment-based
 setup.
 

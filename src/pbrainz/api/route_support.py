@@ -6,6 +6,7 @@ from fastapi import Request
 
 from pbrainz.api.models import BridgeStatus, UIProviderStatus, UIStatus
 from pbrainz.config import (
+    NO_API_KEY_PROVIDERS,
     OPENAI_COMPATIBLE_PROVIDERS,
     PROVIDER_DEFAULT_BASE_URLS,
     Settings,
@@ -115,7 +116,7 @@ def _provider_configured_with_updates(
             f"{provider_name}_base_url",
             settings.base_url_for(provider_name),
         )
-        if provider_name in {"ollama", "lmstudio"}:
+        if provider_name in NO_API_KEY_PROVIDERS:
             return bool(str(base_url).strip())
         return bool(
             api_key

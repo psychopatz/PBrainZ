@@ -30,6 +30,8 @@ class PanelState:
     lmstudio_key: tk.StringVar
     custom_base_url: tk.StringVar
     custom_key: tk.StringVar
+    horde_base_url: tk.StringVar
+    horde_key: tk.StringVar
     gemini_key: tk.StringVar
     provider_info: tk.StringVar
     provider_models: dict[str, list[str]] = field(default_factory=dict)
@@ -63,6 +65,8 @@ class PanelState:
             lmstudio_key=tk.StringVar(root),
             custom_base_url=tk.StringVar(root),
             custom_key=tk.StringVar(root),
+            horde_base_url=tk.StringVar(root, value="https://oai.aihorde.net/v1"),
+            horde_key=tk.StringVar(root),
             gemini_key=tk.StringVar(root),
             provider_info=tk.StringVar(root, value=""),
         )
@@ -85,6 +89,8 @@ class PanelState:
             self.lmstudio_key,
             self.custom_base_url,
             self.custom_key,
+            self.horde_base_url,
+            self.horde_key,
             self.gemini_key,
         ):
             variable.trace_add("write", self._mark_settings_dirty)

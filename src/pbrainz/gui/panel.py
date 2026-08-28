@@ -172,6 +172,8 @@ class PBrainZControlPanel:
                 "lmstudio_api_key": self.state.lmstudio_key.get() or None,
                 "custom_base_url": self.state.custom_base_url.get().strip() or None,
                 "custom_api_key": self.state.custom_key.get() or None,
+                "horde_base_url": self.state.horde_base_url.get().strip() or None,
+                "horde_api_key": self.state.horde_key.get() or None,
                 "gemini_api_key": self.state.gemini_key.get() or None,
             },
             lambda data: self._apply_status(data, "Settings saved."),

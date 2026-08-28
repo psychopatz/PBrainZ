@@ -183,6 +183,7 @@ class ControlTab:
                 "ollama": self.state.ollama_base_url,
                 "lmstudio": self.state.lmstudio_base_url,
                 "custom": self.state.custom_base_url,
+                "horde": self.state.horde_base_url,
             }.items():
                 status = provider_statuses.get(provider_name) or {}
                 fallback = data.get("openai_base_url") if provider_name == "openai" else ""
@@ -192,6 +193,7 @@ class ControlTab:
                 "ollama": self.state.ollama_key,
                 "lmstudio": self.state.lmstudio_key,
                 "custom": self.state.custom_key,
+                "horde": self.state.horde_key,
                 "gemini": self.state.gemini_key,
             }.items():
                 status = provider_statuses.get(provider_name) or {}
@@ -288,6 +290,7 @@ class ControlTab:
             "ollama": "Ollama settings (OpenAI-compatible)",
             "lmstudio": "LM Studio settings (OpenAI-compatible)",
             "custom": "Custom OpenAI-compatible settings",
+            "horde": "AI Horde settings (free anonymous access)",
             "gemini": "Gemini settings",
         }.get(provider, "Provider settings")
         self._provider_settings.configure(text=title)
@@ -298,12 +301,14 @@ class ControlTab:
             "ollama": self.state.ollama_base_url,
             "lmstudio": self.state.lmstudio_base_url,
             "custom": self.state.custom_base_url,
+            "horde": self.state.horde_base_url,
         }
         compatible_keys = {
             "openai": self.state.openai_key,
             "ollama": self.state.ollama_key,
             "lmstudio": self.state.lmstudio_key,
             "custom": self.state.custom_key,
+            "horde": self.state.horde_key,
         }
         if provider in compatible_base_urls:
             ttk.Label(self._provider_settings, text="API endpoint").grid(
@@ -314,7 +319,12 @@ class ControlTab:
                 textvariable=compatible_base_urls[provider],
                 width=25,
             ).grid(row=0, column=1, sticky="ew", pady=4)
-            ttk.Label(self._provider_settings, text="API key").grid(
+            key_label = (
+                "API key (optional; anonymous by default)"
+                if provider == "horde"
+                else "API key"
+            )
+            ttk.Label(self._provider_settings, text=key_label).grid(
                 row=1, column=0, sticky="w", pady=4
             )
             ttk.Entry(

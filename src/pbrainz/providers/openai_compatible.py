@@ -43,8 +43,13 @@ class OpenAICompatibleProvider(LLMProvider):
             ) from exc
 
         # OpenAI-compatible endpoints may not require authentication. The SDK
-        # still requires a non-empty key, so use a harmless placeholder.
-        api_key = api_key or "not-needed"
+        # still requires a non-empty key. AI Horde documents 0000000000 as its
+        # anonymous key; use it only for Horde when the user leaves the field
+        # blank, and a harmless placeholder for local unauthenticated servers.
+        if provider_name == "horde":
+            api_key = api_key or "0000000000"
+        else:
+            api_key = api_key or "not-needed"
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -123,28 +128,42 @@ class OpenAICompatibleProvider(LLMProvider):
             "messages": [self._message_param(message) for message in request.messages],
             "stream": stream,
         }
-        for field_name in (
-            "temperature",
-            "top_p",
-            "stop",
-            "presence_penalty",
-            "frequency_penalty",
-            "seed",
-            "user",
-            "metadata",
-            "response_format",
-            "tools",
-            "tool_choice",
-        ):
+        # The Horde OpenAI gateway intentionally exposes a smaller request
+        # schema than the full OpenAI API. In particular, it does not provide
+        # native function/tool calling, so do not send fields it cannot use.
+        field_names = (
+            ("temperature", "top_p", "stop", "presence_penalty", "frequency_penalty")
+            if self.name == "horde"
+            else (
+                "temperature",
+                "top_p",
+                "stop",
+                "presence_penalty",
+                "frequency_penalty",
+                "seed",
+                "user",
+                "metadata",
+                "response_format",
+                "tools",
+                "tool_choice",
+            )
+        )
+        for field_name in field_names:
             value = getattr(request, field_name)
             if value is not None:
+                if self.name == "horde" and field_name == "stop" and isinstance(value, str):
+                    value = [value]
                 params[field_name] = value
 
-        if request.max_completion_tokens is not None:
+        if self.name == "horde":
+            max_tokens = request.max_completion_tokens or request.max_tokens
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+        elif request.max_completion_tokens is not None:
             params["max_completion_tokens"] = request.max_completion_tokens
         elif request.max_tokens is not None:
             params["max_tokens"] = request.max_tokens
-        if request.stream_options is not None:
+        if self.name != "horde" and request.stream_options is not None:
             params["stream_options"] = request.stream_options
         return params
 

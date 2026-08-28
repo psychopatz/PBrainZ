@@ -193,10 +193,13 @@ class UISettingsRequest(BaseModel):
     lmstudio_base_url: str | None = Field(default=None, min_length=1)
     custom_api_key: str | None = None
     custom_base_url: str | None = Field(default=None, min_length=1)
+    horde_api_key: str | None = None
+    horde_base_url: str | None = Field(default=None, min_length=1)
     clear_openai_api_key: bool = False
     clear_ollama_api_key: bool = False
     clear_lmstudio_api_key: bool = False
     clear_custom_api_key: bool = False
+    clear_horde_api_key: bool = False
     clear_gemini_api_key: bool = False
     tts_synthesis_workers: int | None = Field(default=None, ge=1, le=4)
     tts_model_cache_size: int | None = Field(default=None, ge=1, le=16)
