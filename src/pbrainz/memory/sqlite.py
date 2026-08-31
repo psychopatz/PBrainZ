@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .policy import is_context_eligible
 from .types import (
     ConversationSession,
     ConversationTurn,
@@ -619,6 +620,7 @@ class SQLiteMemoryStore:
     ) -> list[ConversationTurn]:
         self.initialize()
         bounded = max(1, min(int(limit), 64))
+        fetch_limit = min(256, max(bounded, bounded * 4))
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -630,12 +632,25 @@ class SQLiteMemoryStore:
                   AND player_uuid = ? AND npc_uuid = ?
                 ORDER BY id DESC LIMIT ?
                 """,
-                (session_id, scope.world_uuid, scope.player_uuid, scope.npc_uuid, bounded),
+                (
+                    session_id,
+                    scope.world_uuid,
+                    scope.player_uuid,
+                    scope.npc_uuid,
+                    fetch_limit,
+                ),
             ).fetchall()
-        return [
-            self._turn(row)
-            for row in reversed(rows)
+        turns = [self._turn(row) for row in reversed(rows)]
+        eligible = [
+            turn
+            for turn in turns
+            if is_context_eligible(
+                turn.content,
+                role=turn.role,
+                metadata=turn.metadata,
+            )
         ]
+        return eligible[-bounded:]
 
     def search_turns(
         self,
@@ -647,6 +662,7 @@ class SQLiteMemoryStore:
         """Find a small, scope-isolated recall window across past sessions."""
         self.initialize()
         bounded = max(1, min(int(limit), 8))
+        fetch_limit = min(32, max(bounded, bounded * 4))
         tokens = [
             token.casefold()
             for token in _TOKEN_RE.findall(_safe_text(query, 2000))
@@ -672,10 +688,20 @@ class SQLiteMemoryStore:
                     scope.player_uuid,
                     scope.npc_uuid,
                     *like_args,
-                    bounded,
+                    fetch_limit,
                 ),
             ).fetchall()
-        return [self._turn(row) for row in reversed(rows)]
+        turns = [self._turn(row) for row in reversed(rows)]
+        eligible = [
+            turn
+            for turn in turns
+            if is_context_eligible(
+                turn.content,
+                role=turn.role,
+                metadata=turn.metadata,
+            )
+        ]
+        return eligible[-bounded:]
 
     def remember(self, memory: MemoryRecord) -> MemoryRecord:
         self.initialize()
@@ -1156,6 +1182,12 @@ class SQLiteMemoryStore:
             if not self._row_visible(row, query.actor_id):
                 continue
             memory = self._memory(row, query.scope)
+            if not is_context_eligible(
+                memory.content,
+                role="assistant",
+                metadata=memory.provenance,
+            ):
+                continue
             if query.requested_kinds and memory.memory_type not in query.requested_kinds:
                 continue
             if not self._matches_participants(
@@ -1167,13 +1199,20 @@ class SQLiteMemoryStore:
             if not self._row_visible(row, query.actor_id, episode=True):
                 continue
             episode = self._episode(row, query.scope)
+            episode_memory = self._episode_memory(episode, query.scope)
+            if not is_context_eligible(
+                episode_memory.content,
+                role="assistant",
+                metadata=episode_memory.provenance,
+            ):
+                continue
             if query.requested_kinds and MemoryType.EPISODE not in query.requested_kinds:
                 continue
             if not self._matches_participants(
                 episode.participants, query.participants, query.actor_id
             ):
                 continue
-            records.append(self._episode_memory(episode, query.scope))
+            records.append(episode_memory)
 
         matches = [self._rank_record(record, query, tokens) for record in records]
         matches.sort(key=lambda item: (item.score, item.memory.updated_at), reverse=True)

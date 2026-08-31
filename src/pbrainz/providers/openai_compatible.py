@@ -1,6 +1,6 @@
 """OpenAI and OpenAI-compatible provider adapter."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from pbrainz.api.models import ChatCompletionRequest, ChatMessage
@@ -237,20 +237,51 @@ class OpenAICompatibleProvider(LLMProvider):
         status_code = getattr(exc, "status_code", None)
         if status_code == 401:
             return ProviderError(
-                "The OpenAI-compatible provider rejected the API key.",
+                OpenAICompatibleProvider._error_message(
+                    "The OpenAI-compatible provider rejected the API key.", exc
+                ),
                 status_code=502,
                 code="provider_auth_error",
             )
         if status_code == 429:
             return ProviderError(
-                "The OpenAI-compatible provider rate-limited the request.",
+                OpenAICompatibleProvider._error_message(
+                    "The OpenAI-compatible provider rate-limited the request.", exc
+                ),
                 status_code=429,
                 code="provider_rate_limited",
             )
         if isinstance(status_code, int) and status_code >= 500:
             return ProviderError(
-                "The OpenAI-compatible provider returned a server error.",
+                OpenAICompatibleProvider._error_message(
+                    "The OpenAI-compatible provider returned a server error.", exc
+                ),
                 status_code=502,
                 code="provider_server_error",
             )
-        return ProviderError(f"OpenAI-compatible provider request failed: {type(exc).__name__}.")
+        return ProviderError(
+            OpenAICompatibleProvider._error_message(
+                f"OpenAI-compatible provider request failed ({type(exc).__name__}).", exc
+            ),
+            code="provider_bad_request" if isinstance(status_code, int) else "provider_error",
+        )
+
+    @staticmethod
+    def _error_message(prefix: str, exc: Exception) -> str:
+        """Keep a bounded, provider-supplied reason without exposing credentials."""
+        detail: object = getattr(exc, "body", None)
+        if isinstance(detail, Mapping):
+            nested = detail.get("error")
+            if isinstance(nested, Mapping):
+                detail = nested.get("message") or nested.get("detail") or nested
+            else:
+                detail = detail.get("message") or detail.get("detail") or detail
+        if detail is None:
+            detail = getattr(exc, "message", None)
+        rendered = " ".join(str(detail or "").split())
+        if not rendered or rendered.casefold() in {"none", str(exc).casefold()}:
+            if isinstance(getattr(exc, "status_code", None), int):
+                rendered = f"HTTP {exc.status_code}"
+            else:
+                return prefix
+        return f"{prefix}: {rendered[:500]}"

@@ -88,6 +88,19 @@ def test_horde_request_uses_only_the_gateway_supported_fields(monkeypatch) -> No
     assert "metadata" not in params
 
 
+def test_provider_error_preserves_the_upstream_reason() -> None:
+    error = SimpleNamespace(
+        status_code=400,
+        body={"error": {"message": "model is not currently available"}},
+    )
+
+    result = OpenAICompatibleProvider._provider_exception(error)
+
+    assert result.code == "provider_bad_request"
+    assert "HTTP" not in result.message
+    assert "model is not currently available" in result.message
+
+
 def test_existing_saved_provider_list_is_migrated_to_include_horde(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "settings.db"
     database = SettingsDatabase(database_path)

@@ -5,13 +5,42 @@ from pathlib import Path
 import pytest
 
 from pbrainz.bridge import BridgeRequest, BridgeRuntimeMonitor, BridgeState
-from pbrainz.bridge.handler import complete_and_deliver, semantic_tool_calls_for
-from pbrainz.bridge.pump import run_bridge_pump
+from pbrainz.bridge.handler import (
+    add_fallback_social_tool_call,
+    complete_and_deliver,
+    sanitize_npc_response,
+    semantic_tool_calls_for,
+)
+from pbrainz.bridge.pump import _CycleFailureReporter, run_bridge_pump
 from pbrainz.bridge.transport import FileBridgeTransport
 from pbrainz.config import Settings
 from pbrainz.conversation_runtime import Utterance
+from pbrainz.exceptions import ProviderError
 from pbrainz.memory import MemoryScope, SQLiteMemoryStore
 from pbrainz.providers.base import CompletionResult
+from pbrainz.semantic_tool_protocol import extract_text_tool_calls
+
+
+def test_repeating_bridge_cycle_failure_is_rate_limited() -> None:
+    reporter = _CycleFailureReporter(repeat_interval=300)
+    error = RuntimeError("bridge command 'pollChat' timed out")
+
+    assert reporter.message("runtime-1", error, now=100.0) == str(error)
+    assert reporter.message("runtime-1", error, now=120.0) is None
+    assert reporter.message("runtime-1", error, now=399.0) is None
+    assert "repeated 3 times" in reporter.message("runtime-1", error, now=400.0)
+    assert reporter.recovered() == 0
+
+
+def test_bridge_cycle_failure_reporter_distinguishes_runtime_or_error_changes() -> None:
+    reporter = _CycleFailureReporter(repeat_interval=300)
+    first = RuntimeError("pollChat timed out")
+    second = RuntimeError("bridge response was malformed")
+
+    assert reporter.message("runtime-1", first, now=10.0) == str(first)
+    assert reporter.message("runtime-1", first, now=11.0) is None
+    changed = reporter.message("runtime-2", second, now=12.0)
+    assert changed == str(second) + "; suppressed 1 identical repeats"
 
 
 def test_file_transport_matches_psychopatzcore_slot_protocol(tmp_path) -> None:
@@ -142,6 +171,96 @@ def test_semantic_tool_calls_are_limited_to_tools_exposed_by_the_game() -> None:
     ]
 
 
+def test_catalog_tool_ids_authorize_semantic_calls_without_full_schemas() -> None:
+    request = {
+        "conversation_context": {
+            "available_tool_ids": ["projecthoomans.llm:social_react"],
+        }
+    }
+    calls = [
+        {
+            "id": "call-insult",
+            "function": {
+                "name": "social_react",
+                "arguments": '{"kind":"insult"}',
+            },
+        }
+    ]
+
+    assert semantic_tool_calls_for(calls, request)[0]["name"] == "social_react"
+
+
+def test_horde_style_text_turn_adds_bounded_insult_tool_call() -> None:
+    request = {
+        "request_id": "request-insult",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "message": "You are an idiot. Shut up.",
+            "available_tool_ids": ["projecthoomans.llm:social_react"],
+        },
+    }
+
+    result = add_fallback_social_tool_call([], request)
+
+    assert result == [
+        {
+            "id": "fallback-insult:request-insult",
+            "name": "social_react",
+            "arguments": {"kind": "insult", "intensity": "normal"},
+            "origin": "provider_neutral_social_fallback",
+        }
+    ]
+
+
+def test_provider_text_action_uses_the_same_canonical_tool_shape() -> None:
+    request = {
+        "request_id": "request-text-action",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "available_tools": [
+                {"type": "function", "function": {"name": "social_react"}},
+            ],
+        },
+    }
+
+    text, calls = extract_text_tool_calls(
+        'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
+        '"arguments":{"kind":"insult"}}</projecthoomans-action>',
+        request,
+    )
+
+    assert text == "Watch your mouth."
+    assert calls[0]["name"] == "social_react"
+    assert calls[0]["arguments"] == {"kind": "insult"}
+
+
+def test_provider_identity_boilerplate_becomes_in_world_npc_dialogue() -> None:
+    request = {
+        "request_id": "request-meta",
+        "npc_id": "npc-one",
+        "conversation_context": {"message": "Are you a bitch?"},
+    }
+    calls = add_fallback_social_tool_call(
+        [],
+        {
+            **request,
+            "conversation_context": {
+                **request["conversation_context"],
+                "available_tools": [
+                    {"type": "function", "function": {"name": "social_react"}}
+                ],
+            },
+        },
+    )
+
+    assert sanitize_npc_response(
+        "I am an AI assistant and I don't have a personal identity.",
+        request,
+        calls,
+    ) == "Watch your mouth."
+    assert sanitize_npc_response("Watch the road.", request, calls) == "Watch the road."
+
+
 class StructuredProviders:
     def __init__(self) -> None:
         self.requests = []
@@ -167,12 +286,32 @@ class StructuredProviders:
         )
 
 
+class TextActionProviders:
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def complete(self, _provider, request):
+        return CompletionResult(
+            request.model,
+            'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
+            '"arguments":{"kind":"insult"}}</projecthoomans-action>',
+        )
+
+
 class EmptyResponseProviders:
     def resolve(self, _provider, model):
         return "custom", model if model != "default" else "fake-model"
 
     async def complete(self, _provider, request):
         return CompletionResult(request.model, "", finish_reason="stop")
+
+
+class FailedProviders:
+    def resolve(self, _provider, model):
+        return "horde", model if model != "default" else "horde-model"
+
+    async def complete(self, _provider, _request):
+        raise ProviderError("Horde request failed", code="provider_server_error")
 
 
 class DeliveryClient:
@@ -223,6 +362,54 @@ async def test_structured_bridge_delivers_authorized_semantic_tool_calls(tmp_pat
 
     assert client.calls[0][1] == "deliverChat"
     assert client.calls[0][2]["semantic_tool_calls"][0]["name"] == "order_follow"
+
+
+@pytest.mark.asyncio
+async def test_text_action_enters_the_same_delivery_pipeline(tmp_path) -> None:
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
+
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="custom",
+        custom_base_url="http://127.0.0.1:1/v1",
+        bridge_required=False,
+    )
+    service = ConversationService(settings, TextActionProviders())
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-text-action-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "You are an idiot.",
+            "available_tools": [
+                {"type": "function", "function": {"name": "social_react"}},
+            ],
+        },
+    }
+
+    await complete_and_deliver(
+        TextActionProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    delivery = client.calls[0][2]
+    assert delivery["response_text"] == "Watch your mouth."
+    assert delivery["semantic_tool_calls"][0]["name"] == "social_react"
+    assert delivery["semantic_tool_calls"][0]["arguments"]["kind"] == "insult"
+    stored = service._store("world-one").recent_turns(
+        "session-one",
+        MemoryScope("world-one", "player-one", "npc-one"),
+        8,
+    )
+    assert all("<projecthoomans-action>" not in turn.content for turn in stored)
 
 
 @pytest.mark.asyncio
@@ -316,6 +503,51 @@ async def test_empty_provider_response_is_explained_and_not_saved_as_memory(tmp_
     assert delivery["finish_reason"] == "stop"
     assert "empty response" in delivery["error"]
     assert service._store("world-one").stats()["turn_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_error_still_delivers_bounded_insult_reaction(tmp_path) -> None:
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
+
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="horde",
+        horde_api_key="test-key",
+        bridge_required=False,
+    )
+    service = ConversationService(settings, FailedProviders())
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-provider-error-insult-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "You are an idiot.",
+            "available_tools": [
+                {"type": "function", "function": {"name": "social_react"}},
+            ],
+        },
+    }
+
+    await complete_and_deliver(
+        FailedProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    delivery = client.calls[0][2]
+    assert delivery["semantic_tool_calls"][0]["name"] == "social_react"
+    assert delivery["semantic_tool_calls"][0]["arguments"]["kind"] == "insult"
+    assert delivery["response_text"] == "Watch your mouth."
+    assert delivery["provider_failure"] is True
+    assert delivery["context_eligible"] is False
+    assert delivery["error"] == "Horde request failed"
 
 
 class FakeProviders:

@@ -80,6 +80,7 @@ class PBrainZControlPanel:
             self._run_request,
             self._apply_status,
             self._request_failed,
+            save_selection=self.save_selection,
             brand_icon=self._brand_icon,
         )
         self.settings_tab = SettingsTab(
@@ -179,14 +180,19 @@ class PBrainZControlPanel:
             lambda data: self._apply_status(data, "Settings saved."),
         )
 
-    def save_chat_selection(self, provider: str, model: str) -> None:
-        """Persist Chat test's provider/model choice after the user settles it."""
+    def save_selection(self, provider: str, model: str) -> None:
+        """Persist the active provider/model so new requests use it immediately."""
 
         self._chat_selection_pending = (provider, model)
         self._chat_selection_generation += 1
         if self._chat_selection_after is not None:
             self.root.after_cancel(self._chat_selection_after)
         self._chat_selection_after = self.root.after(180, self._persist_chat_selection)
+
+    def save_chat_selection(self, provider: str, model: str) -> None:
+        """Persist Chat test's provider/model choice after the user settles it."""
+
+        self.save_selection(provider, model)
 
     def _persist_chat_selection(self) -> None:
         self._chat_selection_after = None
@@ -207,6 +213,9 @@ class PBrainZControlPanel:
             return
         self.chat_tab.set_selection_status("Selection saved")
         self._apply_status(data)
+        provider = str(data.get("default_provider") or "")
+        model = str(data.get("default_model") or "")
+        self.chat_tab.set_selection(provider, model)
 
     def _chat_selection_failed(self, generation: int, error: Exception) -> None:
         if generation != self._chat_selection_generation:

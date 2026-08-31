@@ -12,6 +12,7 @@ from pbrainz.memory import (
     MemoryScope,
     MemoryType,
     MemoryVisibility,
+    RetrievalMatch,
     SQLiteMemoryStore,
     StructuredFact,
 )
@@ -139,6 +140,82 @@ def test_canonical_turn_write_is_idempotent_and_date_aware(tmp_path) -> None:
     assert duplicate.turn.game_day == 4
     assert duplicate.turn.speaker_uuid == "npc-one"
     assert store.stats()["turn_count"] == 1
+
+
+def test_context_filters_legacy_failures_from_turns_memories_and_prompt(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    scope = MemoryScope("world-one", "player-one", "npc-one")
+    store.ensure_session("conversation-one", scope)
+    store.add_turn(
+        "conversation-one",
+        scope,
+        "assistant",
+        "I cannot answer right now. (provider request failed)",
+    )
+    store.add_turn("conversation-one", scope, "assistant", "The shelter is north.")
+    assert [turn.content for turn in store.recent_turns("conversation-one", scope)] == [
+        "The shelter is north."
+    ]
+
+    store.remember(
+        MemoryRecord(
+            "provider-failure-memory",
+            scope,
+            MemoryType.FACT,
+            "I cannot answer right now. (provider request failed) The shelter is north.",
+            visibility=MemoryVisibility.PUBLIC,
+            participants=("npc-one",),
+        )
+    )
+    store.remember(
+        MemoryRecord(
+            "clean-memory",
+            scope,
+            MemoryType.FACT,
+            "The shelter is north.",
+            visibility=MemoryVisibility.PUBLIC,
+            participants=("npc-one",),
+        )
+    )
+    matches = store.retrieve(scope, "shelter", limit=8)
+    assert [match.memory.memory_id for match in matches] == ["clean-memory"]
+
+    result = ContextBuilder().build(
+        ContextInput(
+            npc_name="Harley",
+            player_name="Alex",
+            retrieved_memories=tuple(matches)
+            + (
+                RetrievalMatch(
+                    MemoryRecord(
+                        "direct-failure",
+                        scope,
+                        MemoryType.FACT,
+                        "I cannot answer right now. (provider request failed)",
+                    ),
+                    1.0,
+                ),
+            ),
+            recent_turns=(
+                ConversationTurn("assistant", "I cannot answer right now."),
+                ConversationTurn("assistant", "I will check that now."),
+            ),
+            current_message="Where is the shelter?",
+        )
+    )
+    rendered = "\n".join(message.content or "" for message in result.messages)
+    assert "I cannot answer right now." not in rendered
+    assert "I will check that now." in rendered
+    assert result.diagnostics["retrieved_memories"] == 1
+    assert result.diagnostics["recent_turns"] == 1
+
+
+def test_context_filters_provider_identity_leaks() -> None:
+    from pbrainz.memory import is_context_eligible
+
+    assert not is_context_eligible(
+        "I am an AI assistant and I don't have a personal identity."
+    )
 
 
 def test_canonical_turn_columns_migrate_existing_database(tmp_path) -> None:

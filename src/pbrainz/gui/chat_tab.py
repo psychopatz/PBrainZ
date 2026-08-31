@@ -27,6 +27,9 @@ class ChatTab:
         self._get_timeout = get_timeout
         self._save_selection = save_selection
         self._provider_models: dict[str, list[str]] = {}
+        self._selected_models: dict[str, str] = {}
+        self._active_provider = ""
+        self._active_model = ""
         self._messages: list[dict[str, str]] = []
         self._request_in_flight = False
         self._provider = tk.StringVar(parent)
@@ -146,18 +149,54 @@ class ChatTab:
             self._provider.set(preferred)
         self._provider_changed()
 
+    def set_selection(self, provider: str, model: str) -> None:
+        """Reflect the panel-wide default selection without issuing another save."""
+
+        models = self._provider_models.get(provider, [])
+        if provider not in self._provider_models or model not in models:
+            return
+        self._selected_models[provider] = model
+        self._provider.set(provider)
+        self._model.set(model)
+        self._provider_changed()
+
     def _provider_changed(self, _event: object | None = None) -> None:
+        if _event is not None:
+            self._remember_active_model()
         models = self._provider_models.get(self._provider.get(), [])
         self._model_box["values"] = models
         if not models:
             self._model.set("")
-        elif self._model.get() not in models:
-            self._model.set(models[0])
+        else:
+            preferred = self._selected_models.get(self._provider.get())
+            if preferred not in models:
+                preferred = (
+                    self._model.get()
+                    if _event is None and self._model.get() in models
+                    else models[0]
+                )
+            self._model.set(preferred)
+            self._selected_models[self._provider.get()] = preferred
+        self._active_provider = self._provider.get()
+        self._active_model = self._model.get()
         if _event is not None:
             self._persist_selection()
 
     def _model_changed(self, _event: object | None = None) -> None:
+        provider = self._provider.get()
+        model = self._model.get()
+        if provider and model in self._provider_models.get(provider, []):
+            self._selected_models[provider] = model
+            self._active_provider = provider
+            self._active_model = model
         self._persist_selection()
+
+    def _remember_active_model(self) -> None:
+        if not self._active_provider or not self._active_model:
+            return
+        models = self._provider_models.get(self._active_provider, [])
+        if self._active_model in models:
+            self._selected_models[self._active_provider] = self._active_model
 
     def _persist_selection(self) -> None:
         provider = self._provider.get()

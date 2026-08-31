@@ -30,6 +30,8 @@ class BridgeState:
     tool_catalog_version: int | None = None
     packet_channels: tuple[dict[str, Any], ...] = ()
     message: str = "bridge runtime unavailable"
+    namespaces: tuple[str, ...] = ()
+    namespaces_known: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +45,8 @@ class BridgeState:
             "transport": self.transport,
             "tool_catalog_id": self.tool_catalog_id,
             "tool_catalog_version": self.tool_catalog_version,
+            "namespaces": list(self.namespaces),
+            "namespaces_known": self.namespaces_known,
             "packet_channels": list(self.packet_channels),
             "message": self.message,
         }
@@ -99,6 +103,11 @@ class BridgeRuntimeMonitor:
         lifecycle = str(value.get("lifecycle") or "")
         ready = enabled and lifecycle == "READY"
         tool_catalog_id = value.get("tool_catalog_id")
+        raw_namespaces = value.get("namespaces")
+        normalized_namespaces = tuple(
+            str(name) for name in list(raw_namespaces)[:64]
+            if isinstance(name, str) and name
+        ) if isinstance(raw_namespaces, dict) else ()
         packet_channels = value.get("packet_channels")
         normalized_channels = tuple(
             dict(row) for row in packet_channels[:32]
@@ -122,6 +131,8 @@ class BridgeRuntimeMonitor:
                 and not isinstance(value.get("tool_catalog_version"), bool)
                 else None
             ),
+            namespaces=normalized_namespaces,
+            namespaces_known=isinstance(raw_namespaces, dict),
             packet_channels=normalized_channels,
             message="bridge ready" if ready else f"bridge lifecycle is {lifecycle or 'unknown'}",
         )

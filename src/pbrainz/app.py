@@ -70,12 +70,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.game_bridge_settings = game_bridge_settings
         catalog = ModelCatalogManager(app_settings, providers, database)
         app.state.model_catalog = catalog
+        if app_settings.auto_refresh_models:
+            # A cached catalog can outlive provider-side model availability
+            # (AI Horde changes its worker pool frequently). Refresh the
+            # selected provider before accepting bridge requests so the first
+            # request cannot use a removed model. Failures keep the last good
+            # catalog and are logged once; startup remains usable offline.
+            await _refresh_startup_catalog(app_settings, catalog)
         tts = TTSService(app_settings, save_settings=database.save_settings)
         app.state.tts = tts
         await tts.start()
         # Model catalogs are loaded from SQLite synchronously by the status
-        # route. Network discovery is deliberately manual so startup never
-        # waits on unavailable local providers.
+        # route. Network discovery remains opt-in; when automatic refresh is
+        # enabled, only the active provider was refreshed above.
         app.state.model_refresh_task = None
         controller = BridgeController(
             app_settings,
@@ -122,6 +129,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return app
+
+
+async def _refresh_startup_catalog(
+    settings: Settings, catalog: ModelCatalogManager
+) -> None:
+    """Refresh the active provider when automatic catalog refresh is enabled."""
+
+    provider_name = settings.default_provider.strip().lower()
+    if not provider_name:
+        return
+    try:
+        models = await catalog.refresh_provider(provider_name)
+    except Exception as error:  # noqa: BLE001 - startup must retain the last good catalog.
+        LOGGER.warning(
+            "startup model catalog refresh failed provider=%s reason=%s",
+            provider_name,
+            error,
+        )
+        return
+    LOGGER.info(
+        "startup model catalog refreshed provider=%s count=%d",
+        provider_name,
+        len(models),
+    )
 
 
 app = create_app()

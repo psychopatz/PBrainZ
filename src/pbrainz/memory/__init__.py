@@ -5,6 +5,7 @@ SQLite details into the bridge or provider code.  A future sqlite-vec or
 remote retriever can implement the same ``MemoryRetriever`` contract.
 """
 
+from .policy import is_context_eligible
 from .sqlite import SQLiteMemoryStore, memory_root_for_settings
 from .types import (
     ConversationSession,
@@ -38,6 +39,7 @@ __all__ = [
     "RetrievalMatch",
     "SQLiteMemoryStore",
     "memory_root_for_settings",
+    "is_context_eligible",
     "StructuredFact",
     "TurnWriteResult",
 ]

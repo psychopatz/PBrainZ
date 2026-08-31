@@ -92,6 +92,7 @@ class TurnWriteResult:
 
     turn: ConversationTurn
     duplicate: bool = False
+    skipped: bool = False
 
 
 @dataclass(frozen=True, slots=True)

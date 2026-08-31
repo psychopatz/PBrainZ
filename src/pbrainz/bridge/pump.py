@@ -22,6 +22,54 @@ from .voice import VoicePacketConsumer, voice_channel_available
 
 LOGGER = logging.getLogger(__name__)
 
+BRIDGE_FAILURE_REPEAT_LOG_INTERVAL = 300.0
+
+
+class _CycleFailureReporter:
+    """Keep one repeating bridge failure from consuming the activity log."""
+
+    def __init__(self, repeat_interval: float = BRIDGE_FAILURE_REPEAT_LOG_INTERVAL) -> None:
+        self.repeat_interval = max(1.0, repeat_interval)
+        self._key: tuple[str, str, str] | None = None
+        self._last_logged_at = 0.0
+        self._suppressed = 0
+
+    def message(
+        self,
+        runtime_id: str | None,
+        error: Exception,
+        now: float | None = None,
+    ) -> str | None:
+        current_time = time.monotonic() if now is None else now
+        key = (runtime_id or "unknown", type(error).__name__, str(error))
+        if key != self._key:
+            previous_suppressed = self._suppressed
+            self._key = key
+            self._last_logged_at = current_time
+            self._suppressed = 0
+            suffix = (
+                f"; suppressed {previous_suppressed} identical repeats"
+                if previous_suppressed
+                else ""
+            )
+            return f"{error}{suffix}"
+
+        self._suppressed += 1
+        if current_time - self._last_logged_at < self.repeat_interval:
+            return None
+        suppressed = self._suppressed
+        self._suppressed = 0
+        elapsed = max(0.0, current_time - self._last_logged_at)
+        self._last_logged_at = current_time
+        return f"{error} (repeated {suppressed} times over {elapsed:.0f}s)"
+
+    def recovered(self) -> int:
+        suppressed = self._suppressed
+        self._key = None
+        self._last_logged_at = 0.0
+        self._suppressed = 0
+        return suppressed
+
 
 async def run_bridge_pump(
     settings: Settings,
@@ -43,17 +91,21 @@ async def run_bridge_pump(
         settings, providers, trace_writer=trace_writer
     )
     observed_runtime_id: str | None = None
-    observed_state: tuple[bool, bool, str | None, str | None, str | None] | None = None
+    observed_state: tuple[
+        bool, bool, str | None, str | None, str | None, tuple[str, ...]
+    ] | None = None
     observed_catalog: tuple[str | None, str | None] | None = None
     catalog_retry_at = 0.0
     catalog_cache = ToolCatalogCache()
     voice_consumer = VoicePacketConsumer(tts_service) if tts_service else None
     sync_supported: bool | None = None
+    missing_namespace_runtime: str | None = None
+    cycle_failures = _CycleFailureReporter()
     while True:
         state = monitor.read()
         state_signature = (
             state.available, state.ready, state.runtime_id, state.lifecycle,
-            state.tool_catalog_id,
+            state.tool_catalog_id, state.namespaces,
         )
         if state_signature != observed_state:
             LOGGER.info(
@@ -103,6 +155,18 @@ async def run_bridge_pump(
         if not state.ready or not state.runtime_id:
             await asyncio.sleep(settings.bridge_poll_interval)
             continue
+        if state.namespaces_known and NAMESPACE not in state.namespaces:
+            if missing_namespace_runtime != state.runtime_id:
+                LOGGER.warning(
+                    "Project Hoomans LLM bridge namespace is not registered; "
+                    "waiting for the ProjectHoomans client integration runtime=%s root=%s",
+                    state.runtime_id,
+                    transport.root,
+                )
+                missing_namespace_runtime = state.runtime_id
+            await asyncio.sleep(settings.bridge_poll_interval)
+            continue
+        missing_namespace_runtime = None
         try:
             if voice_consumer and voice_channel_available(state):
                 try:
@@ -141,6 +205,13 @@ async def run_bridge_pump(
                         raise
             request = await client.call(NAMESPACE, "pollChat", {}, state.runtime_id)
             if request.get("status") != "pending":
+                recovered = cycle_failures.recovered()
+                if recovered:
+                    LOGGER.info(
+                        "Project Hoomans bridge cycle recovered; "
+                        "suppressed repeated failures=%s",
+                        recovered,
+                    )
                 await asyncio.sleep(settings.bridge_poll_interval)
                 continue
             request = hydrate_request(request, catalog_cache)
@@ -158,13 +229,21 @@ async def run_bridge_pump(
                 conversation_service=conversation_service,
                 tts_service=tts_service,
             )
+            recovered = cycle_failures.recovered()
+            if recovered:
+                LOGGER.info(
+                    "Project Hoomans bridge cycle recovered; suppressed repeated failures=%s",
+                    recovered,
+                )
         except asyncio.CancelledError:
             raise
         except (BridgeClientError, ProviderError, ValueError, TypeError) as error:
-            LOGGER.warning(
-                "Project Hoomans bridge cycle failed root=%s runtime=%s: %s",
-                transport.root,
-                state.runtime_id or "unknown",
-                error,
-            )
+            message = cycle_failures.message(state.runtime_id, error)
+            if message is not None:
+                LOGGER.warning(
+                    "Project Hoomans bridge cycle failed root=%s runtime=%s: %s",
+                    transport.root,
+                    state.runtime_id or "unknown",
+                    message,
+                )
             await asyncio.sleep(settings.bridge_poll_interval)

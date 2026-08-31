@@ -123,9 +123,12 @@ location. The database is created fresh for each portable copy, is local-only,
 and should be kept private.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
-startup without network requests. The panel's Refresh models button updates
-only the selected provider, so an unavailable local provider cannot slow down
-startup or replace another provider's model list.
+startup. By default startup does not make network requests; the panel's
+Refresh models button updates only the selected provider. When
+`AUTO_REFRESH_MODELS=true` is enabled, startup refreshes only the active
+provider before bridge requests begin, preventing a removed AI Horde model
+from being selected from an old cache while keeping unavailable local
+providers from blocking startup by default.
 
 The source install is intentionally non-editable so the environment contains
 the installed application package, which is a cleaner base for a future
@@ -202,8 +205,9 @@ priority. The Custom profile accepts any user-defined OpenAI-compatible endpoint
 and does not require a key. Each profile has its own endpoint, credentials,
 model catalog, and selected model, so changing one does not change the others.
 The Horde OpenAI gateway is text-completion focused and does not provide native
-function/tool calling; P BrainZ therefore omits unsupported tool fields for
-Horde requests and falls back to ordinary dialogue generation.
+function/tool calling. P BrainZ keeps that limitation inside the provider
+adapter: the shared conversation pipeline still normalizes native calls and
+provider text action envelopes into the same untrusted semantic tool calls.
 `OPENAI_BASE_URL` remains available for OpenAI Cloud during environment-based
 setup.
 
@@ -299,8 +303,10 @@ The structured game request also carries a compact canonical character card,
 relationship snapshot, notable current state, recent dialogue, and the
 semantic tools exposed for that NPC. P BrainZ owns prompt assembly and
 conversation memory; Project Hoomans remains authoritative for gameplay. Any
-returned order intent is sent back as an untrusted semantic tool call and is
-validated by the game's existing command registry before it can be submitted.
+returned order or social intent—whether native or text-encoded—is sent back as
+an untrusted semantic tool call and is validated by the game's existing command
+or relationship authority before it can be applied. Provider errors and
+fallback dialogue are marked ineligible for future NPC context and RAG.
 
 ## NPC memory and context
 

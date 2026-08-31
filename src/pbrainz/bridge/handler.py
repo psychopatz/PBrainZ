@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from json import JSONDecodeError
 from typing import Any
 
@@ -12,6 +13,11 @@ from pbrainz.conversation_runtime import Utterance
 from pbrainz.conversation_service import ConversationRequest, ConversationService
 from pbrainz.exceptions import ProviderError
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.semantic_tool_protocol import (
+    ensure_social_intent,
+    extract_text_tool_calls,
+    is_social_insult,
+)
 from pbrainz.tts import TTSService
 
 from .client import BridgeClient
@@ -27,6 +33,15 @@ from .state import BridgeState
 from .voice import voice_channel_available
 
 LOGGER = logging.getLogger(__name__)
+
+_NPC_META_RESPONSE_RE = re.compile(
+    r"(?:\b(?:i am|i'm)\s+(?:an?\s+)?ai(?:\s+assistant|\s+chatbot)?\b|"
+    r"\bas an ai\b|\b(?:language model|large language model)\b|"
+    r"\b(?:openai|chatgpt)\b|"
+    r"\b(?:i do not|i don't) have (?:a )?(?:personal )?(?:identity|name)\b|"
+    r"\b(?:i cannot|i can't) engage with .*?(?:hostile|demeaning)\b)",
+    re.IGNORECASE,
+)
 
 
 async def complete_and_deliver(
@@ -58,6 +73,11 @@ async def complete_and_deliver(
             source="project-hoomans.bridge",
         )
     tts_utterance: Utterance | None = None
+    structured = bool(
+        request.get("conversation_context")
+        or request.get("world_uuid")
+        or request.get("worldUUID")
+    )
     LOGGER.info(
         "NPC provider task started npc=%s request=%s message=%s",
         npc_id,
@@ -68,11 +88,6 @@ async def complete_and_deliver(
     model_name = "unknown"
     failure_reason: str | None = None
     try:
-        structured = bool(
-            request.get("conversation_context")
-            or request.get("world_uuid")
-            or request.get("worldUUID")
-        )
         if structured:
             if conversation_service is None:
                 raise ValueError("conversation service is unavailable")
@@ -115,6 +130,19 @@ async def complete_and_deliver(
         semantic_tool_calls = (
             semantic_tool_calls_for(result.tool_calls, request) if structured else []
         )
+        if structured:
+            response_text, text_tool_calls = extract_text_tool_calls(
+                response_text, request
+            )
+            semantic_tool_calls.extend(text_tool_calls)
+            semantic_tool_calls = ensure_social_intent(
+                semantic_tool_calls, request
+            )
+            response_text = sanitize_npc_response(
+                response_text,
+                request,
+                semantic_tool_calls,
+            )
         presentation_reason: str | None = None
         if not response_text and semantic_tool_calls:
             # Providers commonly return a tool-only assistant turn.  The game
@@ -173,13 +201,14 @@ async def complete_and_deliver(
                 )
         LOGGER.info(
             "NPC response received from provider npc=%s request=%s provider=%s model=%s "
-            "finish_reason=%s tool_calls=%s text=%s",
+            "finish_reason=%s provider_tool_calls=%s semantic_tool_calls=%s text=%s",
             npc_id,
             request_id,
             provider_name,
             model_name,
             result.finish_reason or "unknown",
             len(result.tool_calls or []),
+            len(semantic_tool_calls),
             preview(response_text),
         )
     except ProviderError as error:
@@ -189,6 +218,17 @@ async def complete_and_deliver(
             "npc_id": npc_id,
             "error": error.message[:1024],
         }
+        if structured:
+            fallback_calls = ensure_social_intent(
+                [], request, reason="provider_request_failed"
+            )
+            if fallback_calls:
+                arguments["semantic_tool_calls"] = fallback_calls
+            arguments["response_text"] = npc_fallback_response(
+                request, fallback_calls
+            )
+            arguments["provider_failure"] = True
+            arguments["context_eligible"] = False
     except Exception as error:
         failure_reason = type(error).__name__
         arguments = {
@@ -297,6 +337,58 @@ def tool_ack_text(request: dict[str, Any]) -> str:
     return "I'll check that now."
 
 
+def sanitize_npc_response(
+    response: str,
+    request: dict[str, Any],
+    semantic_tool_calls: list[dict[str, Any]] | None = None,
+) -> str:
+    """Keep provider identity/policy boilerplate out of NPC dialogue."""
+    response = str(response or "").strip()
+    if not response or not _NPC_META_RESPONSE_RE.search(response):
+        return response
+    fallback = npc_fallback_response(request, semantic_tool_calls)
+    LOGGER.warning(
+        "NPC provider response replaced meta boilerplate npc=%s request=%s reaction=%s",
+        str(request.get("npc_id") or "unknown"),
+        str(request.get("request_id") or "unknown"),
+        reaction_from_tool_calls(semantic_tool_calls) or "none",
+    )
+    return fallback
+
+
+def reaction_from_tool_calls(
+    semantic_tool_calls: list[dict[str, Any]] | None,
+) -> str:
+    for call in semantic_tool_calls or []:
+        if not isinstance(call, dict) or call.get("name") != "social_react":
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, dict):
+            return str(
+                arguments.get("kind") or arguments.get("reaction") or ""
+            ).strip()
+    return ""
+
+
+def npc_fallback_response(
+    request: dict[str, Any],
+    semantic_tool_calls: list[dict[str, Any]] | None = None,
+) -> str:
+    reaction = reaction_from_tool_calls(semantic_tool_calls)
+    if not reaction and is_social_insult(request_message(request)):
+        reaction = "insult"
+    fallback = {
+        "insult": "Watch your mouth.",
+        "praise": "I appreciate that.",
+        "comfort": "Thanks. I needed that.",
+        "apology": "Fine. Just don't do it again.",
+        "flirt": "Careful. You might get the wrong idea.",
+        "greeting": "Hello.",
+        "farewell": "Stay safe.",
+    }.get(reaction, "Give me a moment.")
+    return fallback
+
+
 def preview(value: object, limit: int = 1200) -> str:
     rendered = " ".join(str(value or "").split())
     if not rendered:
@@ -316,7 +408,7 @@ def semantic_tool_calls_for(
         return []
     exposed_tools = context.get("available_tools", context.get("availableTools", []))
     if not isinstance(exposed_tools, list):
-        return []
+        exposed_tools = []
     exposed: set[str] = set()
     for tool in exposed_tools:
         if not isinstance(tool, dict):
@@ -325,6 +417,17 @@ def semantic_tool_calls_for(
         name = function.get("name")
         if name:
             exposed.add(str(name))
+    tool_ids = context.get("available_tool_ids") or []
+    if not isinstance(tool_ids, list):
+        tool_ids = []
+    for tool_id in tool_ids:
+        if not isinstance(tool_id, str):
+            continue
+        prefix = "projecthoomans.llm:"
+        if tool_id.startswith(prefix):
+            name = tool_id[len(prefix) :].strip()
+            if name:
+                exposed.add(name)
     normalized: list[dict[str, Any]] = []
     rejected: list[str] = []
     for call in tool_calls[:8]:
@@ -361,3 +464,13 @@ def semantic_tool_calls_for(
             ",".join(sorted(exposed)[:16]) or "<none>",
         )
     return normalized
+
+
+def add_fallback_social_tool_call(
+    calls: list[dict[str, Any]],
+    request: dict[str, Any],
+    *,
+    reason: str = "provider_no_native_tool",
+) -> list[dict[str, Any]]:
+    """Compatibility name for the provider-neutral social intent stage."""
+    return ensure_social_intent(calls, request, reason=reason)

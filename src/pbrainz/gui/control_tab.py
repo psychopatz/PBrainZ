@@ -15,6 +15,7 @@ from .state import PanelState
 
 StatusFn = Callable[[dict[str, Any], str | None], None]
 ErrorFn = Callable[[Exception], None]
+SelectionSaveFn = Callable[[str, str], None]
 
 
 class ControlTab:
@@ -28,13 +29,18 @@ class ControlTab:
         apply_status: StatusFn,
         request_failed: ErrorFn,
         brand_icon: tk.PhotoImage | None = None,
+        save_selection: SelectionSaveFn | None = None,
     ) -> None:
         self.state = state
         self._request = request
         self._apply_status = apply_status
         self._request_failed = request_failed
+        self._save_selection = save_selection
         self._brand_icon = brand_icon
         self._rendered_provider: str | None = None
+        self._selected_models: dict[str, str] = {}
+        self._active_provider = ""
+        self._active_model = ""
         self._api_test_in_flight = False
         self._api_test_status = tk.StringVar(parent, value="")
         self._provider_settings: ttk.LabelFrame
@@ -104,6 +110,7 @@ class ControlTab:
             model_row, textvariable=self.state.model, state="readonly", width=20
         )
         self.model_box.grid(row=0, column=0, sticky="ew")
+        self.model_box.bind("<<ComboboxSelected>>", self._model_changed)
         ttk.Button(model_row, text="Refresh models", command=self.refresh_models).grid(
             row=0, column=1, padx=(6, 0)
         )
@@ -168,12 +175,17 @@ class ControlTab:
         if not preserve_unsaved or self.state.provider.get() not in providers:
             self.state.provider.set(server_provider)
             self.state.model.set(data.get("default_model") or "")
+            server_models = self.state.provider_models.get(server_provider, [])
+            if self.state.model.get() in server_models:
+                self._selected_models[server_provider] = self.state.model.get()
         elif self.state.model.get() not in self.state.provider_models.get(
             self.state.provider.get(), []
         ):
             models = self.state.provider_models.get(self.state.provider.get(), [])
-            if models:
-                self.state.model.set(data.get("default_model") or models[0])
+            preferred = self._selected_models.get(self.state.provider.get())
+            if preferred not in models:
+                preferred = models[0] if models else ""
+            self.state.model.set(preferred)
         if not preserve_unsaved:
             provider_statuses = {
                 item.get("name"): item for item in data.get("providers", [])
@@ -263,17 +275,54 @@ class ControlTab:
         self._api_test_status.set(f"API test failed: {error}")
 
     def _provider_changed(self, _event: object | None = None) -> None:
+        if _event is not None:
+            self._remember_active_model()
         models = self.state.provider_models.get(self.state.provider.get(), [])
         self.model_box["values"] = models
         if not models:
             self.state.model.set("")
-        elif self.state.model.get() not in models:
-            self.state.model.set(models[0])
+        else:
+            preferred = self._selected_models.get(self.state.provider.get())
+            if preferred not in models:
+                preferred = (
+                    self.state.model.get()
+                    if _event is None and self.state.model.get() in models
+                    else models[0]
+                )
+            self.state.model.set(preferred)
+            self._selected_models[self.state.provider.get()] = preferred
+        self._active_provider = self.state.provider.get()
+        self._active_model = self.state.model.get()
         configured = self.state.provider_configured.get(self.state.provider.get(), False)
         self.state.provider_info.set(
             "Configured" if configured else "API key or endpoint is missing"
         )
         self._render_provider_settings()
+        if _event is not None:
+            self._persist_selection()
+
+    def _remember_active_model(self) -> None:
+        if not self._active_provider or not self._active_model:
+            return
+        models = self.state.provider_models.get(self._active_provider, [])
+        if self._active_model in models:
+            self._selected_models[self._active_provider] = self._active_model
+
+    def _model_changed(self, _event: object | None = None) -> None:
+        provider = self.state.provider.get()
+        model = self.state.model.get()
+        if provider and model in self.state.provider_models.get(provider, []):
+            self._selected_models[provider] = model
+            self._active_provider = provider
+            self._active_model = model
+        if _event is not None:
+            self._persist_selection()
+
+    def _persist_selection(self) -> None:
+        provider = self.state.provider.get()
+        model = self.state.model.get()
+        if self._save_selection and provider and model:
+            self._save_selection(provider, model)
 
     @staticmethod
     def _set_if_changed(variable: tk.StringVar, value: str) -> None:

@@ -256,6 +256,56 @@ def test_conversation_sync_owns_canonical_message_identity(tmp_path) -> None:
     assert service._store("world-one").stats()["turn_count"] == 1
 
 
+def test_conversation_sync_excludes_provider_failures_but_keeps_tool_ack(tmp_path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, FakeProviders())
+    failure = {
+        "messageID": "conversation-one:failure",
+        "saveUUID": "world-one",
+        "conversationID": "conversation-one",
+        "playerUUID": "player-one",
+        "npcUUID": "npc-one",
+        "speakerID": "npc-one",
+        "speakerName": "Harley",
+        "speakerKind": "npc",
+        "text": "I cannot answer right now. (OpenAI-compatible provider request failed.)",
+        "source": {
+            "kind": "llm",
+            "channel": "response",
+            "providerFailure": True,
+            "contextEligible": False,
+        },
+    }
+    tool_ack = {
+        **failure,
+        "messageID": "conversation-one:tool-ack",
+        "text": "I will check that now.",
+        "source": {
+            "kind": "llm",
+            "channel": "response",
+            "providerFailure": False,
+            "contextEligible": True,
+        },
+    }
+
+    skipped = service.record_message(failure)
+    recorded = service.record_message(tool_ack)
+    acknowledged = service.record_message_batch({"messages": [failure, tool_ack]})
+
+    assert skipped.skipped is True
+    assert skipped.turn.message_id == failure["messageID"]
+    assert recorded.skipped is False
+    assert acknowledged == (failure["messageID"], tool_ack["messageID"])
+    turns = service._store("world-one").recent_turns(
+        "conversation-one",
+        MemoryScope("world-one", "player-one", "npc-one"),
+    )
+    assert [turn.content for turn in turns] == [tool_ack["text"]]
+
+
 @pytest.mark.asyncio
 async def test_conversation_recall_finds_dated_turns_from_a_previous_session(tmp_path) -> None:
     providers = FakeProviders()

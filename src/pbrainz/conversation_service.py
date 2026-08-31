@@ -26,10 +26,12 @@ from pbrainz.memory import (
     SQLiteMemoryStore,
     StructuredFact,
     TurnWriteResult,
+    is_context_eligible,
     memory_root_for_settings,
 )
 from pbrainz.providers.base import CompletionResult
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.semantic_tool_protocol import ensure_social_intent, extract_text_tool_calls
 
 LOGGER = logging.getLogger(__name__)
 TraceWriter = Callable[..., None]
@@ -370,7 +372,7 @@ class ConversationService:
                     ConversationTurn(role=item["role"], content=item["content"])
                     for item in request.recent_conversation
                 ]
-            store.record_turn(
+            input_write = store.record_turn(
                 request.session_id,
                 request.scope,
                 "user",
@@ -392,6 +394,15 @@ class ConversationService:
                 speaker_uuid=request.scope.player_uuid,
                 speaker_name=request.player_name,
                 speaker_kind="player",
+            )
+            LOGGER.info(
+                "NPC memory turn saved phase=input npc=%s request=%s message=%s "
+                "duplicate=%s skipped=%s",
+                request.scope.npc_uuid,
+                request.request_id,
+                request.message_id or f"llm-input:{request.request_id}",
+                input_write.duplicate,
+                input_write.skipped,
             )
             query = MemoryQuery(
                 scope=request.scope,
@@ -609,6 +620,30 @@ class ConversationService:
                     source="pbrainz.provider",
                 )
             result_text = str(result.text or "").strip()
+        protocol_request = {
+            "request_id": request.request_id,
+            "npc_id": request.scope.npc_uuid,
+            "conversation_context": {
+                "message": request.message,
+                "available_tools": list(request.available_tools),
+            },
+        }
+        result_text, text_tool_calls = extract_text_tool_calls(
+            result_text, protocol_request
+        )
+        normalized_tool_calls = list(result.tool_calls or [])
+        normalized_tool_calls.extend(text_tool_calls)
+        normalized_tool_calls = ensure_social_intent(
+            normalized_tool_calls, protocol_request
+        )
+        result = CompletionResult(
+            model=result.model,
+            text=result_text,
+            finish_reason=result.finish_reason,
+            usage=result.usage,
+            tool_calls=normalized_tool_calls or None,
+            reasoning=result.reasoning,
+        )
         diagnostics.update(
             {
                 "provider": provider_name,
@@ -627,7 +662,7 @@ class ConversationService:
 
         try:
             if result_text:
-                store.record_turn(
+                output_write = store.record_turn(
                     request.session_id,
                     request.scope,
                     "assistant",
@@ -649,6 +684,15 @@ class ConversationService:
                     speaker_uuid=request.scope.npc_uuid,
                     speaker_name=request.npc_name,
                     speaker_kind="npc",
+                )
+                LOGGER.info(
+                    "NPC memory turn saved phase=output npc=%s request=%s message=%s "
+                    "duplicate=%s skipped=%s",
+                    request.scope.npc_uuid,
+                    request.request_id,
+                    f"llm-response:{request.request_id}",
+                    output_write.duplicate,
+                    output_write.skipped,
                 )
                 current_count = session_turn_count + 2
                 consolidation_threshold = max(
@@ -714,18 +758,41 @@ class ConversationService:
             metadata["namespace"] = namespace
         if isinstance(source, dict):
             metadata["event_source"] = source
+        provenance = message.get("provenance")
+        if isinstance(provenance, dict):
+            metadata["provenance"] = provenance
         participants = message.get("participants")
         if isinstance(participants, list):
             metadata["participants"] = participants[:16]
         speaker_kind = _text_value(message, "speaker_kind", "speakerKind")
-        role = "user" if speaker_kind == "player" else "assistant"
+        role = "user" if speaker_kind.casefold() == "player" else "assistant"
+        if not is_context_eligible(
+            content,
+            role=role,
+            metadata=metadata,
+        ):
+            result = TurnWriteResult(
+                ConversationTurn(
+                    role=role,
+                    content=content,
+                    message_id=message_id,
+                    metadata=metadata,
+                    speaker_kind=speaker_kind,
+                ),
+                skipped=True,
+            )
+            LOGGER.info(
+                "NPC memory sync skipped message=%s reason=llm_context_excluded",
+                message_id,
+            )
+            return result
         store = self._store(world_uuid)
         store.ensure_session(
             conversation_id,
             scope,
             {"source": "project-hoomans-sync", "conversation_id": conversation_id},
         )
-        return store.record_turn(
+        result = store.record_turn(
             conversation_id,
             scope,
             role,
@@ -742,6 +809,17 @@ class ConversationService:
             ),
             speaker_kind=speaker_kind,
         )
+        LOGGER.info(
+            "NPC memory sync saved npc=%s conversation=%s message=%s role=%s "
+            "duplicate=%s skipped=%s",
+            npc_uuid,
+            conversation_id,
+            message_id,
+            role,
+            result.duplicate,
+            result.skipped,
+        )
+        return result
 
     def record_message_batch(self, batch: dict[str, Any]) -> tuple[str, ...]:
         """Record valid outbox entries and return only IDs safe to acknowledge."""
@@ -758,6 +836,11 @@ class ConversationService:
                 LOGGER.warning("Skipping invalid conversation sync message: %s", error)
                 continue
             acknowledged.append(result.turn.message_id or "")
+        LOGGER.info(
+            "NPC memory sync batch processed records=%s acknowledged=%s",
+            len(messages),
+            len(acknowledged),
+        )
         return tuple(message_id for message_id in acknowledged if message_id)
 
     def _store(self, world_uuid: str) -> SQLiteMemoryStore:
@@ -772,6 +855,8 @@ class ConversationService:
         result = self.consolidator.consolidate(request.scope, request.session_id, turns)
         participant_ids = _participant_ids(request)
         game_day = request.game_day
+        summary_saved = bool(result.summary)
+        memories_saved = len(result.memories)
         if game_day is None:
             dated_turns = [turn.game_day for turn in turns if turn.game_day is not None]
             game_day = dated_turns[-1] if dated_turns else None
@@ -892,6 +977,21 @@ class ConversationService:
             )
         if request.end_session:
             store.end_session(request.session_id, request.scope, result.summary)
+        stats = store.stats(request.scope)
+        LOGGER.info(
+            "NPC memory consolidation saved npc=%s session=%s turns=%s "
+            "summary_saved=%s memories_saved=%s end_session=%s "
+            "totals_memory=%s totals_episode=%s totals_fact=%s",
+            request.scope.npc_uuid,
+            request.session_id,
+            len(turns),
+            summary_saved,
+            memories_saved,
+            request.end_session,
+            stats.get("memory_count", 0),
+            stats.get("episode_count", 0),
+            stats.get("fact_count", 0),
+        )
 
 
 _HISTORICAL_CUES = re.compile(
