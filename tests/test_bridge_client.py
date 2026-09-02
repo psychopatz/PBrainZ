@@ -18,7 +18,15 @@ from pbrainz.conversation_runtime import Utterance
 from pbrainz.exceptions import ProviderError
 from pbrainz.memory import MemoryScope, SQLiteMemoryStore
 from pbrainz.providers.base import CompletionResult
-from pbrainz.semantic_tool_protocol import extract_text_tool_calls
+from pbrainz.semantic_tool_protocol import (
+    ensure_identity_intent,
+    ensure_social_intent,
+    extract_text_tool_calls,
+    infer_social_intent,
+    is_provider_scaffold,
+    social_reply_repair_needed,
+    strip_provider_scaffold,
+)
 
 
 def test_repeating_bridge_cycle_failure_is_rate_limited() -> None:
@@ -206,8 +214,127 @@ def test_horde_style_text_turn_adds_bounded_insult_tool_call() -> None:
         {
             "id": "fallback-insult:request-insult",
             "name": "social_react",
-            "arguments": {"kind": "insult", "intensity": "normal"},
+            "arguments": {
+                "kind": "insult",
+                "intensity": "normal",
+                "subtype": "hostile_abuse",
+                "explicit": False,
+            },
             "origin": "provider_neutral_social_fallback",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "kind", "subtype"),
+    [
+        ("I admire you.", "admire", "compliment"),
+        ("You are incredibly attractive.", "flirt", "romantic_interest"),
+        ("I'm here for you.", "comfort", None),
+        ("I'm sorry about that.", "apologize", None),
+        ("Good job out there.", "praise", "compliment"),
+    ],
+)
+def test_provider_text_turn_adds_explicit_positive_social_tool_call(
+    message: str,
+    kind: str,
+    subtype: str | None,
+) -> None:
+    request = {
+        "request_id": f"request-{kind}",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "message": message,
+            "available_tool_ids": ["projecthoomans.llm:social_react"],
+        },
+    }
+
+    result = add_fallback_social_tool_call([], request)
+
+    assert result[0]["id"] == f"fallback-{kind}:request-{kind}"
+    assert result[0]["name"] == "social_react"
+    assert result[0]["arguments"]["kind"] == kind
+    assert result[0]["arguments"]["intensity"] == "normal"
+    if subtype:
+        assert result[0]["arguments"]["subtype"] == subtype
+    else:
+        assert "subtype" not in result[0]["arguments"]
+
+
+@pytest.mark.parametrize(
+    ("message", "reaction", "subtype"),
+    [
+        ("I want to have sex with you.", "flirt", "sexual_advance"),
+        ("wanna fuck babe", "flirt", "sexual_advance"),
+        ("Fuck you.", "insult", "hostile_abuse"),
+        ("You are beautiful.", "flirt", "romantic_interest"),
+    ],
+)
+def test_social_language_gets_distinct_safe_subtypes(
+    message: str,
+    reaction: str,
+    subtype: str,
+) -> None:
+    intent = infer_social_intent(message)
+    assert intent == {
+        "reaction": reaction,
+        "subtype": subtype,
+        **({"explicit": True} if subtype == "sexual_advance" else {
+            "explicit": False,
+        } if subtype == "hostile_abuse" else {}),
+    }
+
+
+def test_provider_cannot_route_an_explicit_advance_into_insult_channel() -> None:
+    request = {
+        "request_id": "request-sexual-advance",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "message": "wanna fuck babe",
+            "available_tool_ids": ["projecthoomans.llm:social_react"],
+        },
+    }
+    calls = [{
+        "id": "provider-misclassified",
+        "name": "social_react",
+        "arguments": {"kind": "insult", "intensity": "normal"},
+    }]
+
+    normalized = ensure_social_intent(calls, request)
+
+    assert normalized[0]["arguments"]["kind"] == "flirt"
+    assert normalized[0]["arguments"]["subtype"] == "sexual_advance"
+    assert normalized[0]["arguments"]["explicit"] is True
+
+
+def test_explicit_social_reply_repair_only_targets_generic_acknowledgements() -> None:
+    assert social_reply_repair_needed(
+        "I want to have sex with you.", "I'll check that now."
+    ) is True
+    assert social_reply_repair_needed(
+        "I want to have sex with you.", "No. Back off."
+    ) is False
+    assert social_reply_repair_needed("You are an idiot.", "Watch your mouth.") is False
+
+
+def test_name_question_adds_authoritative_identity_tool_call() -> None:
+    request = {
+        "request_id": "request-name",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "message": "What's your name?",
+            "available_tool_ids": ["projecthoomans.llm:ask_name"],
+        },
+    }
+
+    result = ensure_identity_intent([], request)
+
+    assert result == [
+        {
+            "id": "fallback-ask-name:request-name",
+            "name": "ask_name",
+            "arguments": {},
+            "origin": "provider_neutral_identity_fallback",
         }
     ]
 
@@ -234,6 +361,57 @@ def test_provider_text_action_uses_the_same_canonical_tool_shape() -> None:
     assert calls[0]["arguments"] == {"kind": "insult"}
 
 
+def test_truncated_provider_action_is_removed_from_npc_dialogue() -> None:
+    request = {
+        "request_id": "request-truncated-action",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "message": "You are an idiot.",
+            "available_tools": [
+                {"type": "function", "function": {"name": "social_react"}},
+            ],
+        },
+    }
+
+    text, calls = extract_text_tool_calls(
+        'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
+        '"arguments',
+        request,
+    )
+
+    assert text == "Watch your mouth."
+    assert calls == []
+    recovered = ensure_social_intent(calls, request)
+    assert recovered[0]["name"] == "social_react"
+    assert recovered[0]["arguments"]["kind"] == "insult"
+
+
+def test_horde_prompt_scaffold_is_not_npc_dialogue() -> None:
+    leaked = (
+        '"Ugh, you look terrible."'
+        "\n\nInstruction:\n"
+        "dude you look terrible\n\nResponse"
+    )
+
+    assert is_provider_scaffold(leaked) is True
+    assert strip_provider_scaffold(leaked) == '"Ugh, you look terrible."'
+    assert strip_provider_scaffold("Instruction:\ndude you look terrible") == ""
+    assert strip_provider_scaffold("Watch your mouth.") == "Watch your mouth."
+
+    leaked_review = (
+        "Hmm? Join you? I'm just wandering, truth be told.\n\n"
+        "Self-Correction: That was commentary, not the final output.\n"
+        "Final Check: respond directly.\n"
+        "New attempt: Hmm? Join you?"
+    )
+    assert is_provider_scaffold(leaked_review) is True
+    assert strip_provider_scaffold(leaked_review) == (
+        "Hmm? Join you? I'm just wandering, truth be told."
+    )
+    assert is_provider_scaffold("Final Check: respond directly") is True
+    assert strip_provider_scaffold("New attempt: Hmm?") == ""
+
+
 def test_provider_identity_boilerplate_becomes_in_world_npc_dialogue() -> None:
     request = {
         "request_id": "request-meta",
@@ -258,6 +436,16 @@ def test_provider_identity_boilerplate_becomes_in_world_npc_dialogue() -> None:
         request,
         calls,
     ) == "Watch your mouth."
+    leaked_scaffold = (
+        '"Ugh, you always seem to have the most demanding things to say!"\n\n'
+        "---\n\n"
+        "Self-Correction Check: The last turn's instructions are missing the "
+        "actual prompt for the final response. Will assume the player's last "
+        "message was \"You are a jerk.\".\n\n"
+        "Player's last message: You are a jerk.\n\n"
+        "Emilio's required action: Use"
+    )
+    assert sanitize_npc_response(leaked_scaffold, request, calls) == "Watch your mouth."
     assert sanitize_npc_response("Watch the road.", request, calls) == "Watch the road."
 
 
@@ -298,12 +486,52 @@ class TextActionProviders:
         )
 
 
+class PlainNameProviders:
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def complete(self, _provider, request):
+        return CompletionResult(request.model, "I'm Harley.")
+
+
+class NameToolOnlyThenDialogueProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def complete(self, _provider, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return CompletionResult(
+                request.model,
+                "",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    {
+                        "id": "call-name",
+                        "function": {"name": "ask_name", "arguments": "{}"},
+                    }
+                ],
+            )
+        return CompletionResult(request.model, "Of course. Let me introduce myself.")
+
+
 class EmptyResponseProviders:
     def resolve(self, _provider, model):
         return "custom", model if model != "default" else "fake-model"
 
     async def complete(self, _provider, request):
         return CompletionResult(request.model, "", finish_reason="stop")
+
+
+class LongResponseProviders:
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def complete(self, _provider, request):
+        return CompletionResult(request.model, "R" * 5000)
 
 
 class FailedProviders:
@@ -413,6 +641,102 @@ async def test_text_action_enters_the_same_delivery_pipeline(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_plain_name_turn_enters_the_authoritative_identity_pipeline(tmp_path) -> None:
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
+
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="custom",
+        custom_base_url="http://127.0.0.1:1/v1",
+        bridge_required=False,
+    )
+    service = ConversationService(settings, PlainNameProviders())
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-name-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "What's your name?",
+            "available_tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_name",
+                        "description": "Ask the NPC to say their name.",
+                    },
+                },
+            ],
+        },
+    }
+
+    await complete_and_deliver(
+        PlainNameProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    delivery = client.calls[0][2]
+    assert delivery["semantic_tool_calls"][0]["name"] == "ask_name"
+    assert delivery["semantic_tool_calls"][0]["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_name_tool_only_turn_delivers_repaired_dialogue_and_tool(tmp_path) -> None:
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
+
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="custom",
+        custom_base_url="http://127.0.0.1:1/v1",
+        bridge_required=False,
+    )
+    providers = NameToolOnlyThenDialogueProviders()
+    service = ConversationService(settings, providers)
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-name-repair-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "What's your name?",
+            "available_tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_name",
+                        "description": "Ask the NPC to say their name.",
+                    },
+                },
+            ],
+        },
+    }
+
+    await complete_and_deliver(
+        providers,
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    delivery = client.calls[0][2]
+    assert delivery["response_text"] == "Of course. Let me introduce myself."
+    assert delivery["presentation_reason"] == "llm_tool_response_repair"
+    assert delivery["semantic_tool_calls"][0]["name"] == "ask_name"
+
+
+@pytest.mark.asyncio
 async def test_tool_only_turn_uses_shared_ack_for_delivery_and_tts(tmp_path) -> None:
     from pbrainz.bridge import BridgeState
     from pbrainz.conversation_service import ConversationService
@@ -503,6 +827,26 @@ async def test_empty_provider_response_is_explained_and_not_saved_as_memory(tmp_
     assert delivery["finish_reason"] == "stop"
     assert "empty response" in delivery["error"]
     assert service._store("world-one").stats()["turn_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_preserves_long_response_text() -> None:
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-long-response-1",
+        "npc_id": "npc-one",
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "Tell me more."}],
+    }
+
+    await complete_and_deliver(
+        LongResponseProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+    )
+
+    assert client.calls[0][2]["response_text"] == "R" * 5000
 
 
 @pytest.mark.asyncio
@@ -613,6 +957,8 @@ async def test_tts_bridge_sends_only_compact_start_event_and_keeps_text_payload(
         "conversation_id": "conversation-one",
         "utterance_id": "conversation-one:pnc-tts-1",
         "npc_uuid": "npc-one",
+        "speaker_id": "npc-one",
+        "speaker_kind": "npc",
         "text": "Stay close to the shelter.",
         "duration_ms": 0,
     }

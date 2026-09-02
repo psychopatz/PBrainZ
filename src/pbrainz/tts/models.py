@@ -19,7 +19,7 @@ DownloadProgressCallback = Callable[[int, int], None]
 VOICE_PRESET_SLOTS = tuple(
     [f"VoiceFemale:{index}" for index in range(4)] + [f"VoiceMale:{index}" for index in range(4)]
 )
-# These are the voices used to make a fresh P BrainZ installation immediately
+# These are the voices used to make a fresh PBrainZ installation immediately
 # useful.  The service installs only the models that are still missing; a
 # user-selected value in a slot is never overwritten.
 DEFAULT_TTS_PRESETS: tuple[tuple[str, str], ...] = (
@@ -286,7 +286,7 @@ class VoicePresetRepository:
         return self.all()
 
     def ensure_defaults(self) -> tuple[str, ...]:
-        """Fill empty slots with the built-in P BrainZ voice selections."""
+        """Fill empty slots with the built-in PBrainZ voice selections."""
 
         current = self.all()
         missing = [

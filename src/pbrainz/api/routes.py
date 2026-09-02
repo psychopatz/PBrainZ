@@ -1,4 +1,4 @@
-"""P BrainZ API router hub.
+"""PBrainZ API router hub.
 
 Endpoint implementations live in focused modules while this file owns the
 application's route assembly.

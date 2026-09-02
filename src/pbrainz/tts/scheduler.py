@@ -168,13 +168,13 @@ class SpeechScheduler:
         if runtime is None:
             runtime = ConversationRuntime(
                 utterance.conversation_id,
-                participants=(utterance.speaker_npc_uuid,),
+                participants=(utterance.speaker_key,),
                 max_generated_ahead=self.settings.tts_max_generated_ahead,
                 max_tts_ready_ahead=self.settings.tts_max_tts_ready_ahead,
             )
             self.runtimes[utterance.conversation_id] = runtime
         else:
-            runtime.add_participant(utterance.speaker_npc_uuid)
+            runtime.add_participant(utterance.speaker_id, utterance.speaker_kind)
         if not runtime.can_generate():
             return False
         runtime.enqueue_generated(utterance)
@@ -296,4 +296,3 @@ async def _safe_callback(callback: Callable[..., Awaitable[None]], *args: Any) -
         await callback(*args)
     except Exception as error:
         LOGGER.warning("TTS lifecycle callback failed: %s", error)
-

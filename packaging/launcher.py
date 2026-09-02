@@ -1,4 +1,4 @@
-"""PyInstaller entry point for the P BrainZ native application."""
+"""PyInstaller entry point for the PBrainZ native application."""
 
 from pbrainz.__main__ import main
 

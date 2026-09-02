@@ -1,4 +1,4 @@
-"""About information for the native P BrainZ control panel."""
+"""About information for the native PBrainZ control panel."""
 
 from __future__ import annotations
 
@@ -41,13 +41,13 @@ class AboutTab:
         )
         row += 1
 
-        details = ttk.LabelFrame(outer, text="About P BrainZ", padding=14)
+        details = ttk.LabelFrame(outer, text="About PBrainZ", padding=14)
         details.grid(row=row, column=0, sticky="ew")
         details.columnconfigure(0, weight=1)
         ttk.Label(
             details,
             text=(
-                "P BrainZ is a portable, local-first control panel for provider "
+                "PBrainZ is a portable, local-first control panel for provider "
                 "connections, game bridges, conversation memory, and voice playback."
             ),
             justify=tk.LEFT,

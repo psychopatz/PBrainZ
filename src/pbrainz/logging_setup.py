@@ -24,7 +24,7 @@ class SQLiteLogHandler(logging.Handler):
 
 
 def configure_logging(database: SettingsDatabase, level: str) -> None:
-    """Attach one SQLite handler to the P BrainZ logger for this app instance."""
+    """Attach one SQLite handler to the PBrainZ logger for this app instance."""
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     for handler in list(logger.handlers):

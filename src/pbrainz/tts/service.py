@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from pbrainz.config import Settings
+from pbrainz.tts.text import normalize_tts_text
 
 from ..conversation_runtime import Utterance, VoiceBinding, VoiceBindingCache
 from .audio import AudioOutput, PiperProvider
@@ -427,14 +429,20 @@ class TTSService:
         conversation_id: str,
         npc_uuid: str,
         binding: VoiceBinding | None,
+        speaker_kind: str = "npc",
     ) -> VoiceBinding | None:
         """Remember Lua's compact identity and reuse it for later utterances."""
 
+        speaker_kind = str(speaker_kind or "npc").strip().lower() or "npc"
+        speaker_id = str(npc_uuid)[:256]
         if binding is not None:
-            if binding.npc_uuid != str(npc_uuid)[:256]:
+            if (
+                binding.speaker_id != speaker_id
+                or binding.speaker_kind != speaker_kind
+            ):
                 return None
             return self.voice_bindings.remember(conversation_id, binding)
-        return self.voice_bindings.get(conversation_id, npc_uuid)
+        return self.voice_bindings.get(conversation_id, speaker_id, speaker_kind)
 
     async def enqueue(
         self,
@@ -444,6 +452,12 @@ class TTSService:
         on_finished: SpeechCallback | None = None,
         on_failed: FailureCallback | None = None,
     ) -> bool:
+        speech_text = normalize_tts_text(utterance.text)
+        if not speech_text:
+            self.last_error = "TTS skipped: utterance has no speakable text"
+            return False
+        if speech_text != utterance.text:
+            utterance = replace(utterance, text=speech_text)
         accepted = await self.scheduler.enqueue(
             utterance,
             on_started=on_started,
@@ -459,6 +473,10 @@ class TTSService:
         return accepted
 
     async def test_voice(self, slot: str, text: str) -> bool:
+        normalized_text = normalize_tts_text(text)
+        if not normalized_text:
+            self.last_error = "TTS skipped: test text has no speakable text"
+            return False
         binding = VoiceBinding("tts-test", slot)
         if not self.output.available:
             self.last_error = "audio output backend is unavailable"
@@ -467,7 +485,7 @@ class TTSService:
             self.last_error = self._voice_test_error(binding)
             return False
         task = asyncio.create_task(
-            self._play_voice_test(binding, text[:MAX_TEST_TEXT]),
+            self._play_voice_test(binding, normalized_text[:MAX_TEST_TEXT]),
             name=f"tts-test-{slot}",
         )
         self.last_error = None
@@ -487,7 +505,7 @@ class TTSService:
 
         if not self.enabled:
             return False
-        normalized_text = str(text).strip()
+        normalized_text = normalize_tts_text(text)
         if not normalized_text:
             return False
         if not self.output.available:

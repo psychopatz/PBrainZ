@@ -86,6 +86,26 @@ def test_context_builder_omits_normal_optional_sections_and_enforces_budget() ->
     assert result.messages[-1].content == "Where is the shelter?"
 
 
+def test_context_builder_puts_compact_horde_output_contract_first() -> None:
+    assert len(ContextBuilder.CORE_RULES) <= 1450
+
+    result = ContextBuilder(max_chars=2000).build(
+        ContextInput(
+            npc_name="Emilio",
+            player_name="Alex",
+            current_message="dude you look terrible",
+        )
+    )
+    system = result.messages[0].content or ""
+    assert "Output only 1-2 short" in system
+    assert "Instruction:" in system
+    assert "Response" in system
+    assert "Self-Correction:" in system
+    assert "Final Check:" in system
+    assert "New attempt:" in system
+    assert "reply in character" in system
+
+
 def test_hearsay_memory_keeps_claim_provenance_without_making_a_fact(tmp_path) -> None:
     store = SQLiteMemoryStore(tmp_path, "world-one")
     scope = MemoryScope("world-one", "player-one", "npc-bob")

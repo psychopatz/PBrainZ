@@ -3,14 +3,21 @@ from types import SimpleNamespace
 import pytest
 
 from pbrainz.api.control_routes import (
+    add_template_model,
     mock_chat,
     seed_mock_memories,
     ui_delete_memory,
     ui_memory,
 )
-from pbrainz.api.models import MemoryDeleteRequest, MockChatRequest, MockChatSeedRequest
+from pbrainz.api.models import (
+    MemoryDeleteRequest,
+    MockChatRequest,
+    MockChatSeedRequest,
+    UITemplateModelAddRequest,
+)
 from pbrainz.config import Settings
 from pbrainz.conversation_service import ConversationService
+from pbrainz.database import SettingsDatabase
 from pbrainz.providers.base import CompletionResult
 
 
@@ -20,6 +27,58 @@ class FakeProviders:
 
     async def complete(self, _provider, request):
         return CompletionResult(request.model, "I remember the Riverside shelter.")
+
+
+class FakeRegistry:
+    provider_names = ("custom",)
+
+
+def _template_model_request(tmp_path):
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="custom",
+        custom_base_url="http://mock-provider",
+    )
+    database = SettingsDatabase(settings.database_path)
+    database.initialize()
+    app = SimpleNamespace(
+        title="PBrainZ",
+        state=SimpleNamespace(
+            settings=settings,
+            providers=FakeRegistry(),
+            database=database,
+            bridge_controller=SimpleNamespace(
+                as_dict=lambda: {
+                    "bridge": {
+                        "available": False,
+                        "enabled": False,
+                        "ready": False,
+                        "message": "test",
+                    },
+                    "worker_enabled": False,
+                    "worker_running": False,
+                }
+            ),
+            game_bridge_settings=SimpleNamespace(
+                read=lambda: SimpleNamespace(enabled=False)
+            ),
+        ),
+    )
+    return SimpleNamespace(app=app)
+
+
+@pytest.mark.asyncio
+async def test_template_model_can_add_and_persist_a_provider_model(tmp_path) -> None:
+    request = _template_model_request(tmp_path)
+
+    result = await add_template_model(
+        request,
+        UITemplateModelAddRequest(provider="custom", model="npc-template-v2"),
+    )
+
+    assert result.providers[0].configured_models == ["npc-template-v2"]
+    assert request.app.state.settings.custom_models == "npc-template-v2"
+    assert request.app.state.database.load_settings()["custom_models"] == "npc-template-v2"
 
 
 def _request_context(tmp_path):

@@ -24,7 +24,7 @@ def default_zomboid_path() -> Path:
     """Find the conventional Project Zomboid data directory for this OS.
 
     ``Path.home()`` follows the active operating system and user account. The
-    first candidate preserves the existing P BrainZ default; the additional
+    first candidate preserves the existing PBrainZ default; the additional
     candidates cover common Linux, macOS, and redirected Documents layouts.
     An explicit environment value always wins and is useful for portable or
     custom installations.

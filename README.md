@@ -1,6 +1,6 @@
-# P BrainZ
+# PBrainZ
 
-P BrainZ is a modular local AI gateway and control panel for Project Zomboid
+PBrainZ is a modular local AI gateway and control panel for Project Zomboid
 mods. It exposes an OpenAI-compatible Chat Completions API, local voice
 playback, memory, and game bridges while keeping provider-specific code behind
 one async adapter interface.
@@ -55,7 +55,7 @@ directly.
 
 When started by either launcher, a lightweight native Python `tkinter` control
 panel opens automatically. It shows whether the Project Hoomans bridge is
-detected and ready, whether the local P BrainZ bridge worker is running, and
+detected and ready, whether the local PBrainZ bridge worker is running, and
 whether each provider is configured. It also allows the default provider,
 model, timeout, polling interval, and Project Hoomans bridge setting to be
 changed. These settings and API keys are saved in the local SQLite database;
@@ -98,14 +98,14 @@ the selected voice remains selected while filters, refreshes, and sorting rerend
 
 Voice presets map the canonical Project Hoomans slots (`VoiceFemale:0` through
 `VoiceMale:3`) to local Piper model IDs. Model paths and IDs remain inside
-P BrainZ and never enter Project Hoomans NPC data or the bridge audio path.
+PBrainZ and never enter Project Hoomans NPC data or the bridge audio path.
 Preset selections are saved automatically when a combobox changes. Female and
 male preset groups default to their matching gender, with a checkbox on each
 group to show all installed genders. Each option includes its gender label,
 such as `female`, `male`, `mixed`, or `unknown`.
 TTS performance tuning is available in the main `Settings` tab; the TTS tab is
 kept focused on voice installation, presets, and playback controls.
-When enabled, P BrainZ plays the local WAV output and sends only compact
+When enabled, PBrainZ plays the local WAV output and sends only compact
 speech lifecycle events so the game can synchronize its existing subtitles.
 Missing Piper, models, or audio output automatically falls back to text-only
 conversation.
@@ -151,6 +151,13 @@ python3 -m pip install ".[build]"
 python3 scripts/build_release.py --target appimage
 ```
 
+PBrainZ is intentionally pre-1.0 while core memory behavior is still under
+development. Local release builds automatically increment the patch version,
+so a build changes `0.1.0` to `0.1.1`. Use `--bump minor` or `--bump major` for
+milestones, `--bump none` to rebuild without changing the version, or
+`--version 0.2.0` to package an explicit version. A failed build restores the
+previous version. CI tag builds pass their tag as the explicit version.
+
 The Windows build produces a single `.exe`. The Linux build produces an
 AppImage and downloads the official `appimagetool` automatically when needed.
 Pushing a `v*` tag runs both builds through
@@ -163,7 +170,22 @@ Windows runner writes `dist/release/PBrainZ-<version>-x86_64.exe`.
 ## Configuration
 
 Use the native control panel to change settings and provider credentials. The
-important controls are:
+dedicated `Templates` tab manages the prompt profiles used by Project Hoomans
+NPC conversations. It includes built-in native-chat and instruct-text profiles
+plus reusable custom profiles. The editor exposes the system addendum, context
+template, example dialogue, turn prefixes, stop sequences, a resolved preview,
+and profile actions (new, duplicate, activate, reset, and delete). Provider
+credentials, model catalogs, and generation settings remain in the `Control
+panel` tab.
+
+The template context editor supports `{{system}}`, `{{history}}`, `{{user}}`,
+`{{assistant}}`, `{{examples}}`, `{{character}}`, `{{char}}`, `{{user_name}}`,
+`{{user_prefix}}`, and `{{assistant_prefix}}`. Native-chat profiles preserve
+provider-native message roles; instruct profiles render one bounded prompt for
+text-template endpoints such as Horde. With the default Native chat profile,
+Horde automatically uses the built-in Instruct text profile per request;
+Gemini and other providers keep native chat. Activating a custom profile (or
+Instruct text explicitly) overrides that automatic Horde selection.
 
 - default provider and model;
 - separate OpenAI Cloud endpoint/API key;
@@ -205,20 +227,20 @@ priority. The Custom profile accepts any user-defined OpenAI-compatible endpoint
 and does not require a key. Each profile has its own endpoint, credentials,
 model catalog, and selected model, so changing one does not change the others.
 The Horde OpenAI gateway is text-completion focused and does not provide native
-function/tool calling. P BrainZ keeps that limitation inside the provider
+function/tool calling. PBrainZ keeps that limitation inside the provider
 adapter: the shared conversation pipeline still normalizes native calls and
 provider text action envelopes into the same untrusted semantic tool calls.
 `OPENAI_BASE_URL` remains available for OpenAI Cloud during environment-based
 setup.
 
-For a request using model `default` or `auto`, P BrainZ prefers
+For a request using model `default` or `auto`, PBrainZ prefers
 `DEFAULT_PROVIDER` when it is configured and falls back to the first enabled
 provider with credentials or a configured local endpoint. This lets a
 Gemini-only or local-only setup work without changing the in-game Project
 Hoomans integration.
 
 By default, chat requests are accepted only while the PsychopatzCore bridge is
-`READY`. P BrainZ reads the bridge's validated runtime marker from the shared
+`READY`. PBrainZ reads the bridge's validated runtime marker from the shared
 `PsychopatzBridge/state` directory. When the bridge is ready, the server polls
 Project Hoomans' narrow NPC-chat capability, calls the configured provider, and
 delivers the reply back through the game tunnel. Set `BRIDGE_REQUIRED=false`
@@ -226,13 +248,13 @@ only for standalone provider testing.
 
 The control-panel bridge switch updates the same
 `~/Zomboid/Lua/PsychopatzCore_Bridge.txt` setting used by the game and controls
-P BrainZ's polling worker together. Project Hoomans applies that setting
+PBrainZ's polling worker together. Project Hoomans applies that setting
 while the game is running, so the profiler is not required for this workflow.
 
 The Settings tab exposes the Project Zomboid data directory used by the bridge.
 It defaults to the current user's conventional `Zomboid` directory and can be
 changed with the folder picker for redirected, portable, or non-standard
-installations. P BrainZ derives `Lua/PsychopatzBridge` and the Core bridge
+installations. PBrainZ derives `Lua/PsychopatzBridge` and the Core bridge
 toggle-file path from that directory; explicit `ZOMBOID_BRIDGE_ROOT` and
 `ZOMBOID_BRIDGE_CONFIG` environment overrides remain supported.
 
@@ -273,7 +295,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
-The `provider` field is a P BrainZ extension. For convenience, a model can
+The `provider` field is a PBrainZ extension. For convenience, a model can
 also be prefixed with `openai/`, `openai:`, `ollama/`, `ollama:`,
 `lmstudio/`, `lmstudio:`, `custom/`, `custom:`, `gemini/`, or
 `gemini:`; the prefix selects the provider and is removed before the upstream
@@ -288,7 +310,7 @@ Start this server before opening a Project Hoomans conversation. Enable the
 Project Hoomans local bridge in the game's bridge configuration, then open an
 NPC conversation. A `TYPE TO TALK` input appears beneath the response choices.
 Submit a message there; the game sends the current NPC conversation history to
-the bridge, P BrainZ calls the selected provider, and the NPC reply is added
+the bridge, PBrainZ calls the selected provider, and the NPC reply is added
 to the conversation log.
 
 The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
@@ -297,11 +319,11 @@ The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
 `projecthoomans.llm` namespace. Requests are tied to the current runtime ID.
 Canonical conversation messages use a bounded, retryable sync outbox, so
 closing the conversation UI does not discard a provider response. Provider
-keys remain in P BrainZ's local SQLite database and never enter the game tunnel.
+keys remain in PBrainZ's local SQLite database and never enter the game tunnel.
 
 The structured game request also carries a compact canonical character card,
 relationship snapshot, notable current state, recent dialogue, and the
-semantic tools exposed for that NPC. P BrainZ owns prompt assembly and
+semantic tools exposed for that NPC. PBrainZ owns prompt assembly and
 conversation memory; Project Hoomans remains authoritative for gameplay. Any
 returned order or social intent—whether native or text-encoded—is sent back as
 an untrusted semantic tool call and is validated by the game's existing command
@@ -310,7 +332,7 @@ fallback dialogue are marked ineligible for future NPC context and RAG.
 
 ## NPC memory and context
 
-NPC memory is separate from the settings database. P BrainZ creates one
+NPC memory is separate from the settings database. PBrainZ creates one
 SQLite database per save/world under the configured `memory_root` (by default,
 the `memory/` directory beside the settings database). The filename contains a
 short hash of the stable Project Zomboid save identifier, while the full

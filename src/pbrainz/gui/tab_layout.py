@@ -7,6 +7,7 @@ The order is intentionally explicit and About is validated as the final tab.
 TAB_LABELS = {
     "control": "Control panel",
     "chat": "Chat test",
+    "template": "Templates",
     "memory": "Memories",
     "debug": "Debug trace",
     "tts": "TTS",
@@ -16,7 +17,7 @@ TAB_LABELS = {
 
 # Product-owned ordering. Keep About last so operational controls and settings
 # remain together before product information.
-TAB_ORDER = ("control", "chat", "memory", "debug", "tts", "settings", "about")
+TAB_ORDER = ("control", "chat", "template", "memory", "debug", "tts", "settings", "about")
 
 
 def ordered_tab_keys() -> tuple[str, ...]:

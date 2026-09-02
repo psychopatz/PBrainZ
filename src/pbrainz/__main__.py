@@ -1,4 +1,4 @@
-"""Command-line entry point for the P BrainZ server."""
+"""Command-line entry point for the PBrainZ server."""
 
 import argparse
 import json

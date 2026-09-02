@@ -1,4 +1,4 @@
-"""P BrainZ voice-preset controls for the native TTS tab."""
+"""PBrainZ voice-preset controls for the native TTS tab."""
 
 from __future__ import annotations
 

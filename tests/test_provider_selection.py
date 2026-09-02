@@ -2,6 +2,10 @@ from pbrainz.config import Settings
 from pbrainz.providers.registry import ProviderRegistry
 
 
+def test_new_settings_default_to_gemini_template_profile() -> None:
+    assert Settings().default_provider == "gemini"
+
+
 def test_provider_registry_uses_live_provider_and_model_selection() -> None:
     settings = Settings(
         enabled_providers="gemini,horde",

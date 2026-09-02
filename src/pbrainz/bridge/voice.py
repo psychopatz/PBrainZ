@@ -9,6 +9,7 @@ from typing import Any
 
 from pbrainz.conversation_runtime import SpeechMode, Utterance, VoiceBinding
 from pbrainz.tts import TTSService
+from pbrainz.tts.text import normalize_tts_text
 
 from .client import BridgeClient
 from .protocol import BridgeClientError
@@ -101,22 +102,37 @@ def utterance_from_packet(
         raise ValueError("voice packet has an unsupported event type")
     if _is_expired(packet, int(time.time() * 1000) if now_ms is None else now_ms):
         return None
-    text = _text(_value(packet, "text"), 12000)
+    raw_text = _text(_value(packet, "text"), 12000)
+    text = normalize_tts_text(raw_text)
     conversation_id = _text(_value(packet, "conversation_id", "conversationID"))
     speaker_id = _text(
         _value(packet, "speaker_id", "speakerID", "npc_uuid", "npcUUID")
     )
+    speaker_kind = _text(
+        _value(packet, "speaker_kind", "speakerKind") or "npc"
+    ).lower()
+    if speaker_kind not in {"npc", "player"}:
+        raise ValueError("voice packet has an unsupported speaker kind")
     utterance_id = _text(
         _value(packet, "utterance_id", "utteranceID", "message_id", "messageID")
     )
-    if not text or not conversation_id or not speaker_id or not utterance_id:
+    if not raw_text or not conversation_id or not speaker_id or not utterance_id:
         raise ValueError("voice packet is missing utterance identity or text")
+    if not text:
+        return None
 
     raw_binding = _value(packet, "voice_binding", "voiceBinding")
     binding = VoiceBinding.from_mapping(raw_binding)
-    resolved_binding = tts_service.resolve_voice_binding(
-        conversation_id, speaker_id, binding
-    )
+    if speaker_kind == "player":
+        resolved_binding = tts_service.resolve_voice_binding(
+            conversation_id, speaker_id, binding, "player"
+        )
+    else:
+        # Keep the legacy three-argument call path for older test doubles and
+        # external adapters while the default remains NPC-compatible.
+        resolved_binding = tts_service.resolve_voice_binding(
+            conversation_id, speaker_id, binding
+        )
     if not isinstance(resolved_binding, VoiceBinding):
         resolved_binding = VoiceBinding.from_mapping(resolved_binding)
     if resolved_binding is None:
@@ -136,6 +152,7 @@ def utterance_from_packet(
         turn=max(0, _integer(_value(packet, "sequence"), 0)),
         speaker_npc_uuid=speaker_id,
         text=text,
+        speaker_kind=speaker_kind,
         speech_mode=mode,
         allow_overlap=_boolean(
             _value(speech, "allow_overlap", "allowOverlap")
@@ -294,6 +311,8 @@ class VoicePacketConsumer:
             "message_id": _text(_value(packet, "message_id", "messageID")),
             "conversation_id": utterance.conversation_id,
             "npc_uuid": utterance.speaker_npc_uuid,
+            "speaker_id": utterance.speaker_id,
+            "speaker_kind": utterance.speaker_kind,
             "source_mod": _text(_value(packet, "source_mod", "sourceMod")),
         }
 

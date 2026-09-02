@@ -42,3 +42,21 @@ def test_tool_router_keeps_safe_fallback_for_small_talk() -> None:
     )
 
     assert [tool["function"]["name"] for tool in selection.selected] == ["social_react"]
+
+
+def test_tool_router_selects_identity_tool_for_name_question() -> None:
+    selection = ToolRouter(max_results=4).select(
+        (
+            _tool("social_react", "Express a social reaction intent."),
+            _tool(
+                "ask_name",
+                "Ask the NPC to say their name through authoritative identity disclosure.",
+            ),
+        ),
+        "What's your name?",
+    )
+
+    assert [tool["function"]["name"] for tool in selection.selected] == [
+        "ask_name",
+        "social_react",
+    ]

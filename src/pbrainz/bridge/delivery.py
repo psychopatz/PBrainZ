@@ -7,9 +7,10 @@ from collections.abc import Awaitable, Callable
 
 from pbrainz.conversation_runtime import Utterance, VoiceBinding
 from pbrainz.tts import TTSService
+from pbrainz.tts.text import normalize_tts_text
 
 from .client import BridgeClient
-from .protocol import MAX_DELIVERY_TEXT, NAMESPACE
+from .protocol import NAMESPACE
 from .state import BridgeState
 
 LOGGER = logging.getLogger(__name__)
@@ -24,7 +25,8 @@ def _build_tts_utterance(
 ) -> Utterance | None:
     """Build a presentation candidate without allowing TTS to affect LLM flow."""
 
-    if not text.strip():
+    speech_text = normalize_tts_text(text)
+    if not speech_text:
         return None
     try:
         context = request.get("conversation_context") or request.get("context") or {}
@@ -66,7 +68,7 @@ def _build_tts_utterance(
             conversation_id=conversation_id,
             turn=int(context.get("turn") or 0),
             speaker_npc_uuid=npc_id,
-            text=text[:MAX_DELIVERY_TEXT],
+            text=speech_text,
             voice_binding=binding,
         )
         LOGGER.info(

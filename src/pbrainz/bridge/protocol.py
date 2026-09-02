@@ -16,7 +16,6 @@ NAMESPACE = "projecthoomans.llm"
 CORE_NAMESPACE = "psychopatzcore.bridge"
 TOOL_CATALOG_COMMAND = "toolCatalog"
 POLL_PACKETS_COMMAND = "pollPackets"
-MAX_DELIVERY_TEXT = MAX_STRING - 128
 
 
 class BridgeClientError(RuntimeError):

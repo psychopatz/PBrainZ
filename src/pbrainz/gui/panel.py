@@ -1,4 +1,4 @@
-"""Window shell and cross-tab coordination for P BrainZ's native GUI."""
+"""Window shell and cross-tab coordination for PBrainZ's native GUI."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any
 
-from pbrainz.branding import PRODUCT_BINARY_NAME, PRODUCT_NAME
+from pbrainz.branding import PRODUCT_BINARY_NAME, PRODUCT_NAME, PRODUCT_VERSION
 
 from .about_tab import AboutTab
 from .chat_tab import ChatTab
@@ -18,6 +18,7 @@ from .request import ApiRequestRunner, RequestFailure, RequestSuccess
 from .settings_tab import SettingsTab
 from .state import PanelState
 from .tab_layout import TAB_LABELS, ordered_tab_keys
+from .template_model_tab import TemplateModelTab
 from .theme import apply_theme
 from .tts.tab import TTSTab
 
@@ -27,7 +28,7 @@ class PBrainZControlPanel:
 
     def __init__(self, host: str, port: int) -> None:
         self.root = tk.Tk(className=PRODUCT_BINARY_NAME)
-        self.root.title(f"{PRODUCT_NAME} Control Panel")
+        self.root.title(f"{PRODUCT_BINARY_NAME} v{PRODUCT_VERSION}")
         self._window_icon: tk.PhotoImage | None = None
         self._brand_icon: tk.PhotoImage | None = None
         self._set_window_icon()
@@ -44,6 +45,7 @@ class PBrainZControlPanel:
         self._chat_selection_generation = 0
         self.control_tab: ControlTab
         self.chat_tab: ChatTab
+        self.template_model_tab: TemplateModelTab
         self.memory_tab: MemoryTab
         self.debug_tab: DebugTab
         self.tts_tab: TTSTab
@@ -67,6 +69,7 @@ class PBrainZControlPanel:
         control_frame = frames["control"]
         settings_frame = frames["settings"]
         chat_frame = frames["chat"]
+        template_frame = frames["template"]
         memory_frame = frames["memory"]
         self._memory_frame = memory_frame
         debug_frame = frames["debug"]
@@ -95,6 +98,13 @@ class PBrainZControlPanel:
             self._run_request,
             self._provider_request_timeout,
             self.save_chat_selection,
+        )
+        self.template_model_tab = TemplateModelTab(
+            template_frame,
+            self.save_template_profile,
+            self.activate_template_profile,
+            self.delete_template_profile,
+            self.reset_template_profile,
         )
         self.memory_tab = MemoryTab(
             memory_frame,
@@ -194,6 +204,73 @@ class PBrainZControlPanel:
 
         self.save_selection(provider, model)
 
+    def save_template_profile(self, profile: dict[str, Any]) -> None:
+        """Persist one editable NPC prompt-template profile."""
+        self._run_request(
+            "POST",
+            "/api/template-profiles",
+            {"profile": profile},
+            self._template_profile_saved,
+            failure=self._template_profile_failed,
+        )
+
+    def _template_profile_saved(self, data: dict[str, Any]) -> None:
+        self.template_model_tab.mark_server_synced()
+        self.template_model_tab.set_action_status("Profile saved")
+        self._apply_status(data)
+
+    def activate_template_profile(self, profile_id: str) -> None:
+        """Make one saved profile active for new NPC turns."""
+
+        self._run_request(
+            "POST",
+            "/api/template-profiles/active",
+            {"profile_id": profile_id},
+            self._template_profile_activated,
+            failure=self._template_profile_failed,
+        )
+
+    def _template_profile_activated(self, data: dict[str, Any]) -> None:
+        self.template_model_tab.sync_active_on_next_status()
+        self.template_model_tab.set_action_status("Profile active")
+        self._apply_status(data)
+
+    def delete_template_profile(self, profile_id: str) -> None:
+        """Delete a user-created template profile."""
+
+        self._run_request(
+            "POST",
+            "/api/template-profiles/delete",
+            {"profile_id": profile_id},
+            self._template_profile_deleted,
+            failure=self._template_profile_failed,
+        )
+
+    def _template_profile_deleted(self, data: dict[str, Any]) -> None:
+        self.template_model_tab.mark_server_synced()
+        self.template_model_tab.set_action_status("Profile deleted")
+        self._apply_status(data)
+
+    def reset_template_profile(self, profile_id: str) -> None:
+        """Restore a shipped template profile."""
+
+        self._run_request(
+            "POST",
+            "/api/template-profiles/reset",
+            {"profile_id": profile_id},
+            self._template_profile_reset,
+            failure=self._template_profile_failed,
+        )
+
+    def _template_profile_reset(self, data: dict[str, Any]) -> None:
+        self.template_model_tab.mark_server_synced()
+        self.template_model_tab.set_action_status("Profile reset")
+        self._apply_status(data)
+
+    def _template_profile_failed(self, error: Exception) -> None:
+        self.template_model_tab.set_action_status(f"Template profile error: {error}")
+        self._request_failed(error)
+
     def _persist_chat_selection(self) -> None:
         self._chat_selection_after = None
         if self._chat_selection_pending is None:
@@ -243,6 +320,7 @@ class PBrainZControlPanel:
             chat_input=text_widgets[1],
             memory_detail=getattr(self.memory_tab, "detail_view", None),
             debug_detail=getattr(self.debug_tab, "detail_view", None),
+            template_views=getattr(self.template_model_tab, "text_widgets", ()),
         )
 
     def _apply_status(self, data: dict[str, Any], success_message: str | None = None) -> None:
@@ -273,6 +351,7 @@ class PBrainZControlPanel:
         providers = self.state.provider_models
         preferred = data.get("default_provider") or next(iter(providers), "")
         self.chat_tab.set_providers(providers, preferred)
+        self.template_model_tab.apply_status(data, preserve_unsaved)
         self.tts_tab.refresh()
         if success_message == "Settings saved.":
             self.state.settings_dirty = False

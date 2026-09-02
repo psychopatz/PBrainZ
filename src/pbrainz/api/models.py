@@ -22,7 +22,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Request body for ``POST /v1/chat/completions``.
 
-    ``provider`` is a P BrainZ extension. Existing OpenAI clients can still
+    ``provider`` is a PBrainZ extension. Existing OpenAI clients can still
     call this endpoint because unknown client-side fields are not required.
     """
 
@@ -211,8 +211,43 @@ class UISettingsRequest(BaseModel):
     tts_audio_buffer_ms: int | None = Field(default=None, ge=0, le=2000)
 
 
+class UITemplateModelAddRequest(BaseModel):
+    """Add a manually configured model ID to an enabled provider profile."""
+
+    provider: str = Field(min_length=1, max_length=32)
+    model: str = Field(min_length=1, max_length=256)
+
+
+class UITemplateProfile(BaseModel):
+    """Editable prompt-template data shown by the native template editor."""
+
+    id: str = Field(default="", max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    mode: Literal["chat", "instruct"] = "chat"
+    description: str = Field(default="", max_length=400)
+    system_prompt: str = Field(default="", max_length=12000)
+    context_template: str = Field(default="", max_length=16000)
+    examples: str = Field(default="", max_length=8000)
+    user_prefix: str = Field(default="User: ", max_length=200)
+    assistant_prefix: str = Field(default="Assistant: ", max_length=200)
+    stop_sequences: list[str] = Field(default_factory=list, max_length=8)
+    builtin: bool = False
+
+
+class UITemplateProfileSaveRequest(BaseModel):
+    """Create or update one prompt-template profile."""
+
+    profile: UITemplateProfile
+
+
+class UITemplateProfileActionRequest(BaseModel):
+    """Identify one profile for activation, deletion, or reset."""
+
+    profile_id: str = Field(min_length=1, max_length=64)
+
+
 class UIBridgeRequest(BaseModel):
-    """Toggle the game bridge setting and the P BrainZ worker together."""
+    """Toggle the game bridge setting and the PBrainZ worker together."""
 
     enabled: bool
 
@@ -224,6 +259,7 @@ class UIProviderStatus(BaseModel):
     api_key: str | None = None
     api_key_hint: str | None = None
     models: list[str]
+    configured_models: list[str] = Field(default_factory=list)
     model_source: str
     models_updated_at: str | None = None
     selected: bool
@@ -248,6 +284,8 @@ class UIStatus(BaseModel):
     game_bridge_setting_enabled: bool
     bridge_worker_enabled: bool
     bridge_worker_running: bool
+    template_profiles: list[UITemplateProfile] = Field(default_factory=list)
+    active_template_profile_id: str = "native-chat"
     tts_synthesis_workers: int = 1
     tts_model_cache_size: int = 2
     tts_max_simultaneous_playback: int = 4

@@ -5,7 +5,6 @@ from .client import BridgeClient
 from .controller import BridgeController
 from .protocol import (
     CORE_NAMESPACE,
-    MAX_DELIVERY_TEXT,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
     MAX_STRING,
@@ -54,7 +53,6 @@ __all__ = [
     "VoicePacketConsumer",
     "utterance_from_packet",
     "voice_channel_available",
-    "MAX_DELIVERY_TEXT",
     "MAX_REQUEST_BYTES",
     "MAX_RESPONSE_BYTES",
     "MAX_RUNTIME_BYTES",

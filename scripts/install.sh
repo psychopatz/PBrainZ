@@ -10,6 +10,6 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 "${VENV_PYTHON}" -m pip install --upgrade pip
 "${VENV_PYTHON}" -m pip install "${PROJECT_ROOT}[dev]"
 
-echo "Installed P BrainZ into ${VENV_DIR}"
+echo "Installed PBrainZ into ${VENV_DIR}"
 echo "The system Python was not modified."
 echo "Next: ./scripts/run.sh, then configure providers in the native control panel"

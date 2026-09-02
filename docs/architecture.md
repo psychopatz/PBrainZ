@@ -1,7 +1,7 @@
-# P BrainZ architecture
+# PBrainZ architecture
 
 This document describes the production-oriented foundation shared by Project
-Hoomans and P BrainZ. The profiler is not part of this boundary.
+Hoomans and PBrainZ. The profiler is not part of this boundary.
 
 ## Responsibilities
 
@@ -10,7 +10,7 @@ Project Hoomans client
   -> canonical Message event + compact conversation context
 PsychopatzCore file bridge
   -> pollChat / deliverChat / pollConversationSync / ackConversationSync
-P BrainZ bridge pump
+PBrainZ bridge pump
   -> canonical-message ingestion + ConversationService
      -> actor-visible MemoryStore + bounded MemoryRetriever (SQLite)
      -> ContextBuilder (bounded provider messages)
@@ -22,7 +22,7 @@ Project Hoomans Commands/Queries
 ```
 
 Project Hoomans owns gameplay state, conversation presentation, identity
-resolution, and all gameplay mutations. P BrainZ owns provider
+resolution, and all gameplay mutations. PBrainZ owns provider
 communication, prompt/context assembly, transcript persistence, retrieval, and
 memory consolidation. Python never writes NPC state, relationship values,
 inventory, health, tasks, factions, or combat state.
@@ -136,9 +136,9 @@ registered behind the same boundary.
 ## Single-player and multiplayer
 
 In single-player the local client publishes the pending conversation through
-the local PsychopatzCore bridge and P BrainZ returns the response. In
+the local PsychopatzCore bridge and PBrainZ returns the response. In
 multiplayer, the client still supplies only its scoped context and semantic
-request. P BrainZ has no authority to mutate server state; any order must
+request. PBrainZ has no authority to mutate server state; any order must
 travel through Project Hoomans' normal server-validated command path. Stable
 player character IDs keep separate players' memory scopes isolated.
 
@@ -180,7 +180,7 @@ Project Hoomans keeps only the current game day's compact UI history per
 player/NPC thread. That cache is allowed to rotate at day rollover because it
 is presentation state, not the authoritative transcript. The sync outbox is
 not cleared at rollover: unacknowledged messages remain until pbrainz stores
-them. P BrainZ retains the full dated turn rows, one compact episode per
+them. PBrainZ retains the full dated turn rows, one compact episode per
 consolidation boundary, per-NPC day synopses, and typed conversational facts.
 It can recall relevant older turns/episodes across sessions, but does not
 inject an entire previous day's transcript into a normal prompt. No new data

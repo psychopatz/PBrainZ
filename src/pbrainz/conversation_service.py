@@ -31,7 +31,20 @@ from pbrainz.memory import (
 )
 from pbrainz.providers.base import CompletionResult
 from pbrainz.providers.registry import ProviderRegistry
-from pbrainz.semantic_tool_protocol import ensure_social_intent, extract_text_tool_calls
+from pbrainz.semantic_tool_protocol import (
+    ensure_identity_intent,
+    ensure_social_intent,
+    extract_text_tool_calls,
+    infer_social_intent,
+    is_provider_scaffold,
+    social_reply_repair_needed,
+    strip_provider_scaffold,
+)
+from pbrainz.template_profiles import (
+    TemplateProfile,
+    active_template_profile,
+    template_profile_for_provider,
+)
 
 LOGGER = logging.getLogger(__name__)
 TraceWriter = Callable[..., None]
@@ -50,6 +63,7 @@ class ConversationRequest:
     player_name: str = "the player"
     character_card: dict[str, Any] = field(default_factory=dict)
     relationship_snapshot: dict[str, Any] = field(default_factory=dict)
+    relationship_capabilities: dict[str, Any] = field(default_factory=dict)
     preferences: dict[str, Any] = field(default_factory=dict)
     current_state: dict[str, Any] = field(default_factory=dict)
     scene: dict[str, Any] = field(default_factory=dict)
@@ -111,6 +125,10 @@ class ConversationRequest:
             relationship_snapshot=_mapping(
                 context.get("relationship_snapshot")
                 or context.get("relationshipSnapshot")
+            ),
+            relationship_capabilities=_mapping(
+                context.get("relationship_capabilities")
+                or context.get("relationshipCapabilities")
             ),
             preferences=_mapping(context.get("preferences")),
             current_state=_mapping(context.get("current_state") or context.get("currentState")),
@@ -253,6 +271,10 @@ class ConversationService:
     ) -> None:
         self.settings = settings
         self.providers = providers
+        self.template_profile = active_template_profile(
+            settings.template_profiles_json,
+            settings.active_template_profile_id,
+        )
         self.context_builder = ContextBuilder(
             max_chars=settings.context_max_chars,
             recent_turn_limit=settings.memory_recent_turns,
@@ -260,10 +282,17 @@ class ConversationService:
             tool_rag_enabled=settings.tool_rag_enabled,
             tool_limit=settings.tool_retrieval_limit,
             tool_budget_chars=settings.tool_budget_chars,
+            template_profile=self.template_profile,
         )
         self.consolidator = consolidator or HeuristicConsolidator()
         self._stores: dict[str, SQLiteMemoryStore] = {}
         self._trace_writer = trace_writer
+
+    def set_template_profile(self, profile: TemplateProfile) -> None:
+        """Switch the live prompt profile without restarting the bridge."""
+
+        self.template_profile = profile
+        self.context_builder.set_template_profile(profile)
 
     def debug_trace_enabled(self) -> bool:
         """Return whether full diagnostic payload construction is active."""
@@ -310,6 +339,7 @@ class ConversationService:
                     "player_name": request.player_name,
                     "character_card": request.character_card,
                     "relationship_snapshot": request.relationship_snapshot,
+                    "relationship_capabilities": request.relationship_capabilities,
                     "preferences": request.preferences,
                     "current_state": request.current_state,
                     "scene": request.scene,
@@ -442,6 +472,17 @@ class ConversationService:
             diagnostics.update({"memory_enabled": False, "memory_error": type(error).__name__})
             LOGGER.warning("NPC memory unavailable; continuing without it: %s", error)
 
+        provider_name, model_name = self.providers.resolve(request.provider, request.model)
+        configured_profile = active_template_profile(
+            self.settings.template_profiles_json,
+            self.settings.active_template_profile_id,
+        )
+        template_profile = template_profile_for_provider(
+            self.settings.template_profiles_json,
+            self.settings.active_template_profile_id,
+            provider_name,
+        )
+        profile_auto_selected = template_profile.id != configured_profile.id
         context_started = time.perf_counter() if self.debug_trace_enabled() else None
         built = self.context_builder.build(
             ContextInput(
@@ -449,6 +490,7 @@ class ConversationService:
                 player_name=request.player_name,
                 character_card=request.character_card,
                 relationship_snapshot=request.relationship_snapshot,
+                relationship_capabilities=request.relationship_capabilities,
                 preferences=request.preferences,
                 current_state=request.current_state,
                 scene=request.scene,
@@ -467,10 +509,10 @@ class ConversationService:
                 recent_turns=tuple(recent),
                 available_tools=request.available_tools,
                 current_message=request.message,
-            )
+            ),
+            template_profile=template_profile,
         )
         context_build_ms = _elapsed_ms(context_started)
-        provider_name, model_name = self.providers.resolve(request.provider, request.model)
         provider_request = ChatCompletionRequest(
             model=model_name,
             provider=provider_name,
@@ -478,7 +520,14 @@ class ConversationService:
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             tools=built.tools or None,
-            metadata={"source": "project-hoomans", "npc_uuid": request.scope.npc_uuid},
+            stop=list(template_profile.stop_sequences) or None,
+            metadata={
+                "source": "project-hoomans",
+                "npc_uuid": request.scope.npc_uuid,
+                "template_profile_id": template_profile.id,
+                "template_profile_requested_id": configured_profile.id,
+                "template_profile_auto_selected": profile_auto_selected,
+            },
         )
         if self.debug_trace_enabled():
             self.record_debug_trace(
@@ -532,47 +581,87 @@ class ConversationService:
                 session_id=request.session_id,
                 source="pbrainz.provider",
             )
-        # Some providers can return a structurally valid response with no text
-        # (for example a safety-filtered result or a tool-only candidate).  Make
-        # one bounded text-only retry when the candidate contains no tool call,
-        # or only tool calls that were not among the declarations sent to the
-        # provider.  An authorized tool-only candidate is intentional and must
-        # reach the game unchanged.
+        # Some providers return a structurally valid tool-only candidate. Make
+        # one bounded text-only repair pass so the game gets natural dialogue as
+        # well as the semantic action. The original authorized calls are kept
+        # separately and remain the only calls that can reach the game. This
+        # costs a second provider request only for the otherwise underwhelming
+        # tool-only case; ordinary turns stay single-pass.
         initial_tool_calls = list(result.tool_calls or [])
         initial_authorized_tool_calls = _authorized_tool_call_count(
             initial_tool_calls, built.tools
         )
-        result_text = str(result.text or "").strip()
-        should_retry_empty = (
-            not result_text
-            and bool(built.tools)
-            and (
-                not initial_tool_calls
-                or initial_authorized_tool_calls == 0
-            )
+        initial_result = result
+        result_text = strip_provider_scaffold(result.text)
+        if result.text and is_provider_scaffold(result.text):
+            diagnostics["provider_scaffold_filtered"] = True
+        should_retry_empty = not result_text and bool(built.tools)
+        should_retry_contextual = (
+            bool(built.tools)
+            and social_reply_repair_needed(request.message, result_text)
         )
-        if should_retry_empty:
+        if should_retry_empty or should_retry_contextual:
             retry_system = (built.messages[0].content or "").rstrip()
             retry_system += (
-                "\n\nReturn a spoken NPC reply for this turn. Do not call tools; "
-                "write the reply as plain dialogue text."
+                "\n\nReturn only the NPC's short spoken reply for this turn. This is "
+                "a text repair after the game selected any needed tool calls. Do "
+                "not call tools or emit action markup; write one or two concise "
+                "in-world sentences as plain dialogue text. Do not say 'I'll "
+                "check that now', 'I will take care of that', or 'I understand'. "
+                "For an ask_name action, do not invent a name; use a natural "
+                "introduction lead-in and let the game provide the authoritative "
+                "name."
             )
+            if should_retry_contextual:
+                intent = infer_social_intent(request.message) or {}
+                subtype = str(intent.get("subtype") or "social action")
+                if subtype == "sexual_advance":
+                    retry_system += (
+                        " The player made an explicit sexual advance. Respond "
+                        "directly and in character; if it is unwelcome, set a "
+                        "clear boundary. Do not claim that consent, sex, or a "
+                        "relationship change occurred, and do not mention tools "
+                        "or this repair."
+                    )
+                else:
+                    retry_system += (
+                        " The player used hostile abuse. Respond directly and in "
+                        "character with a boundary, warning, or anger. Do not "
+                        "mention tools or this repair."
+                    )
             retry_messages = list(built.messages)
             retry_messages[0] = ChatMessage(role="system", content=retry_system)
-            retry_request = provider_request.model_copy(
-                update={"messages": retry_messages, "tools": None}
+            retry_max_tokens = (
+                120
+                if provider_request.max_tokens is None
+                else min(provider_request.max_tokens, 120)
             )
-            diagnostics["empty_response_retry"] = (
-                "text_only_unrecognized_tools"
-                if initial_tool_calls
-                else "text_only"
+            retry_request = provider_request.model_copy(
+                update={
+                    "messages": retry_messages,
+                    "tools": None,
+                    "max_tokens": retry_max_tokens,
+                }
+            )
+            if should_retry_empty:
+                diagnostics["empty_response_retry"] = (
+                    "text_only_authorized_tools"
+                    if initial_authorized_tool_calls
+                    else "text_only_unrecognized_tools"
+                    if initial_tool_calls
+                    else "text_only"
+                )
+            else:
+                diagnostics["contextual_response_retry"] = "explicit_social_subtype"
+            repair_reason = diagnostics.get("empty_response_retry") or diagnostics.get(
+                "contextual_response_retry"
             )
             if self.debug_trace_enabled():
                 self.record_debug_trace(
                     "provider.request",
                     {
                         "attempt": 2,
-                        "reason": diagnostics["empty_response_retry"],
+                        "reason": repair_reason,
                         "provider": provider_name,
                         "model": model_name,
                         "messages": [
@@ -604,7 +693,21 @@ class ConversationService:
                         session_id=request.session_id,
                         source="pbrainz.provider",
                     )
-                raise
+                if initial_authorized_tool_calls:
+                    # A repair failure must not discard an already-valid game
+                    # action. The bridge will select its bounded fallback
+                    # dialogue while still executing these original calls.
+                    diagnostics["tool_response_repair_error"] = type(error).__name__
+                    LOGGER.warning(
+                        "NPC tool-response repair failed; preserving authorized "
+                        "tool calls npc=%s request=%s: %s",
+                        request.scope.npc_uuid,
+                        request.request_id,
+                        error,
+                    )
+                    result = initial_result
+                else:
+                    raise
             if self.debug_trace_enabled():
                 self.record_debug_trace(
                     "provider.response",
@@ -619,7 +722,32 @@ class ConversationService:
                     session_id=request.session_id,
                     source="pbrainz.provider",
                 )
-            result_text = str(result.text or "").strip()
+            result_text = strip_provider_scaffold(result.text)
+            if result.text and is_provider_scaffold(result.text):
+                diagnostics["provider_scaffold_filtered"] = True
+
+            if initial_authorized_tool_calls:
+                # Never allow the text-only repair to replace or invent the
+                # authoritative tool decision. A provider that ignores the
+                # tools=None repair request cannot add a second action.
+                authorized_names = {
+                    _tool_name(tool)
+                    for tool in built.tools
+                    if _tool_name(tool)
+                }
+                preserved_calls = [
+                    call
+                    for call in initial_tool_calls
+                    if _tool_name(call) in authorized_names
+                ]
+                result = CompletionResult(
+                    model=result.model,
+                    text=result.text,
+                    finish_reason=result.finish_reason,
+                    usage=result.usage,
+                    tool_calls=preserved_calls or None,
+                    reasoning=result.reasoning,
+                )
         protocol_request = {
             "request_id": request.request_id,
             "npc_id": request.scope.npc_uuid,
@@ -631,9 +759,14 @@ class ConversationService:
         result_text, text_tool_calls = extract_text_tool_calls(
             result_text, protocol_request
         )
+        if result_text:
+            result_text = strip_provider_scaffold(result_text)
         normalized_tool_calls = list(result.tool_calls or [])
         normalized_tool_calls.extend(text_tool_calls)
         normalized_tool_calls = ensure_social_intent(
+            normalized_tool_calls, protocol_request
+        )
+        normalized_tool_calls = ensure_identity_intent(
             normalized_tool_calls, protocol_request
         )
         result = CompletionResult(

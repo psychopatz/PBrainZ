@@ -42,38 +42,76 @@ class UtteranceState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class VoiceBinding:
-    """Compact voice identity resolved by Project Hoomans' Lua side."""
+    """Compact speaker voice identity resolved by the game-side Lua adapter.
+
+    ``npc_uuid`` remains the storage name for wire compatibility with older
+    releases.  ``speaker_kind`` distinguishes player and NPC identities so a
+    player can safely use the same shared TTS scheduler.
+    """
 
     npc_uuid: str
     slot: str
     pitch: int = 0
+    speaker_kind: str = "npc"
 
     def __post_init__(self) -> None:
         if not str(self.npc_uuid).strip():
-            raise ValueError("voice binding requires npc_uuid")
+            raise ValueError("voice binding requires speaker identity")
         if not str(self.slot).strip() or ":" not in self.slot:
             raise ValueError("voice binding requires a prefix:voiceType slot")
+        kind = str(self.speaker_kind or "npc").strip().lower() or "npc"
+        object.__setattr__(self, "speaker_kind", kind)
+
+    @property
+    def speaker_id(self) -> str:
+        return self.npc_uuid
 
     @classmethod
     def from_mapping(cls, value: object) -> VoiceBinding | None:
         if not isinstance(value, dict):
             return None
-        npc_uuid = str(value.get("npc_uuid") or value.get("npcUUID") or "").strip()
+        speaker_kind = str(
+            value.get("speaker_kind")
+            or value.get("speakerKind")
+            or ("player" if value.get("player_uuid") or value.get("playerUUID") else "npc")
+        ).strip().lower() or "npc"
+        speaker_id = str(value.get("speaker_id") or value.get("speakerID") or "").strip()
+        if not speaker_id:
+            if speaker_kind == "player":
+                speaker_id = str(
+                    value.get("player_uuid") or value.get("playerUUID") or ""
+                ).strip()
+            else:
+                speaker_id = str(
+                    value.get("npc_uuid") or value.get("npcUUID") or ""
+                ).strip()
         slot = str(value.get("slot") or "").strip()
-        if not npc_uuid or not slot:
+        if not speaker_id or not slot:
             return None
         try:
             pitch = int(float(value.get("pitch") or 0))
             return cls(
-                npc_uuid=npc_uuid[:256],
+                npc_uuid=speaker_id[:256],
                 slot=slot[:128],
                 pitch=max(-48, min(48, pitch)),
+                speaker_kind=speaker_kind,
             )
         except (OverflowError, TypeError, ValueError):
             return None
 
     def as_dict(self) -> dict[str, object]:
-        return {"npc_uuid": self.npc_uuid, "slot": self.slot, "pitch": self.pitch}
+        result = {
+            "speaker_id": self.speaker_id,
+            "speaker_kind": self.speaker_kind,
+            "slot": self.slot,
+            "pitch": self.pitch,
+        }
+        if self.speaker_kind == "player":
+            result["player_uuid"] = self.speaker_id
+        else:
+            # Preserve the old field for NPC integrations and saved fixtures.
+            result["npc_uuid"] = self.speaker_id
+        return result
 
 
 @dataclass(slots=True)
@@ -81,7 +119,7 @@ class VoiceBindingCache:
     """Bounded per-session cache of Lua-resolved voice identities."""
 
     max_entries: int = 256
-    _items: OrderedDict[tuple[str, str], VoiceBinding] = field(
+    _items: OrderedDict[tuple[str, str, str], VoiceBinding] = field(
         default_factory=OrderedDict, repr=False
     )
 
@@ -89,15 +127,28 @@ class VoiceBindingCache:
         self.max_entries = max(1, min(int(self.max_entries), 2048))
 
     def remember(self, conversation_id: str, binding: VoiceBinding) -> VoiceBinding:
-        key = (str(conversation_id)[:256], binding.npc_uuid)
+        key = (
+            str(conversation_id)[:256],
+            binding.speaker_kind,
+            binding.speaker_id,
+        )
         self._items.pop(key, None)
         self._items[key] = binding
         while len(self._items) > self.max_entries:
             self._items.popitem(last=False)
         return binding
 
-    def get(self, conversation_id: str, npc_uuid: str) -> VoiceBinding | None:
-        key = (str(conversation_id)[:256], str(npc_uuid)[:256])
+    def get(
+        self,
+        conversation_id: str,
+        speaker_id: str,
+        speaker_kind: str = "npc",
+    ) -> VoiceBinding | None:
+        key = (
+            str(conversation_id)[:256],
+            str(speaker_kind or "npc").strip().lower() or "npc",
+            str(speaker_id)[:256],
+        )
         binding = self._items.get(key)
         if binding is not None:
             self._items.move_to_end(key)
@@ -123,6 +174,7 @@ class Utterance:
     turn: int
     speaker_npc_uuid: str
     text: str
+    speaker_kind: str = "npc"
     speech_mode: SpeechMode = SpeechMode.RESPONSE
     allow_overlap: bool = False
     can_interrupt: bool = False
@@ -137,13 +189,25 @@ class Utterance:
         self.utterance_id = str(self.utterance_id).strip()[:256]
         self.conversation_id = str(self.conversation_id).strip()[:256]
         self.speaker_npc_uuid = str(self.speaker_npc_uuid).strip()[:256]
+        self.speaker_kind = str(self.speaker_kind or "npc").strip().lower() or "npc"
         self.text = str(self.text or "").strip()[:12000]
         if not self.utterance_id or not self.conversation_id or not self.speaker_npc_uuid:
             raise ValueError("utterance identity is required")
         if not self.text:
             raise ValueError("utterance text is required")
-        if self.voice_binding and self.voice_binding.npc_uuid != self.speaker_npc_uuid:
+        if self.voice_binding and (
+            self.voice_binding.speaker_id != self.speaker_id
+            or self.voice_binding.speaker_kind != self.speaker_kind
+        ):
             raise ValueError("voice binding does not match utterance speaker")
+
+    @property
+    def speaker_id(self) -> str:
+        return self.speaker_npc_uuid
+
+    @property
+    def speaker_key(self) -> str:
+        return f"{self.speaker_kind}:{self.speaker_id}"
 
     @property
     def is_overlap(self) -> bool:
@@ -158,6 +222,8 @@ class Utterance:
             "conversation_id": self.conversation_id,
             "utterance_id": self.utterance_id,
             "npc_uuid": self.speaker_npc_uuid,
+            "speaker_id": self.speaker_id,
+            "speaker_kind": self.speaker_kind,
             "text": self.text,
             "duration_ms": self.estimated_or_actual_duration_ms or 0,
         }
@@ -219,20 +285,28 @@ class ConversationRuntime:
     def can_generate(self) -> bool:
         return self.state == "active" and self.generated_ahead_count < self.max_generated_ahead
 
-    def add_participant(self, npc_uuid: str) -> None:
-        npc_uuid = str(npc_uuid).strip()[:256]
-        if npc_uuid and npc_uuid not in self.participants:
-            self.participants = (*self.participants, npc_uuid)
+    def add_participant(self, speaker_id: str, speaker_kind: str = "npc") -> None:
+        speaker_id = str(speaker_id).strip()[:256]
+        speaker_kind = str(speaker_kind or "npc").strip().lower() or "npc"
+        participant = f"{speaker_kind}:{speaker_id}"
+        if speaker_id and participant not in self.participants:
+            self.participants = (*self.participants, participant)
 
     def enqueue_generated(self, utterance: Utterance) -> None:
         if utterance.conversation_id != self.conversation_id:
             raise ValueError("utterance belongs to a different conversation")
-        if self.participants and utterance.speaker_npc_uuid not in self.participants:
+        if self.participants and not (
+            utterance.speaker_key in self.participants
+            or (
+                utterance.speaker_kind == "npc"
+                and utterance.speaker_id in self.participants
+            )
+        ):
             raise ValueError("utterance speaker is not an active participant")
         if utterance.utterance_id in self._utterances:
             raise ValueError("duplicate utterance_id")
         self._utterances[utterance.utterance_id] = utterance
-        self._speaker_queues[utterance.speaker_npc_uuid].append(utterance.utterance_id)
+        self._speaker_queues[utterance.speaker_key].append(utterance.utterance_id)
         self.generated_queue.append(utterance.utterance_id)
         self.next_turn = max(self.next_turn, utterance.turn + 1)
 
@@ -312,7 +386,7 @@ class ConversationRuntime:
         self._speaker_queues.clear()
 
     def _speaker_is_fifo_ready(self, utterance: Utterance) -> bool:
-        queue = self._speaker_queues.get(utterance.speaker_npc_uuid, ())
+        queue = self._speaker_queues.get(utterance.speaker_key, ())
         for earlier_id in queue:
             if earlier_id == utterance.utterance_id:
                 return True

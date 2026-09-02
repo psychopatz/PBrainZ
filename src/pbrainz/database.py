@@ -1,4 +1,4 @@
-"""SQLite persistence for P BrainZ settings, catalogs, and activity logs."""
+"""SQLite persistence for PBrainZ settings, catalogs, and activity logs."""
 
 from __future__ import annotations
 
@@ -59,6 +59,8 @@ PERSISTED_SETTINGS = (
     "memory_recent_turns",
     "memory_retrieval_limit",
     "memory_consolidation_turns",
+    "template_profiles_json",
+    "active_template_profile_id",
     "llm_diagnostics",
     "llm_trace_capture",
     "tts_enabled",

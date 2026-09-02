@@ -10,10 +10,10 @@ if (!(Test-Path -LiteralPath $VenvPython)) {
         throw "Python 3.11 or newer is required. Install Python, then run this script again."
     }
 
-    Write-Host "First run: creating the private P BrainZ environment..."
+    Write-Host "First run: creating the private PBrainZ environment..."
     & $PythonBin -m venv $VenvDir
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not create the P BrainZ virtual environment."
+        throw "Could not create the PBrainZ virtual environment."
     }
 }
 
@@ -22,15 +22,15 @@ $null = & $VenvPython -c $Probe 2>$null
 $NeedsDependencies = $LASTEXITCODE -ne 0
 
 if ($NeedsDependencies) {
-    Write-Host "First run: installing P BrainZ dependencies..."
+    Write-Host "First run: installing PBrainZ dependencies..."
     & $VenvPython -m ensurepip --upgrade *> $null
     & $VenvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not prepare pip inside the P BrainZ virtual environment."
+        throw "Could not prepare pip inside the PBrainZ virtual environment."
     }
     & $VenvPython -m pip install $ProjectRoot
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not install P BrainZ dependencies."
+        throw "Could not install PBrainZ dependencies."
     }
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the canonical P BrainZ SVG into Tk- and desktop-safe PNG assets."""
+"""Render the canonical PBrainZ SVG into Tk- and desktop-safe PNG assets."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def main() -> int:
         import cairosvg
     except ImportError as error:  # pragma: no cover - exercised by build environments.
         raise SystemExit(
-            "CairoSVG is required to render P BrainZ icons. "
+            "CairoSVG is required to render PBrainZ icons. "
             "Install the build dependencies with: pip install -e '.[build]'"
         ) from error
 
@@ -65,7 +65,7 @@ def _remove_container(svg: str) -> str:
             root.remove(child)
             return ElementTree.tostring(root, encoding="unicode")
     raise SystemExit(
-        "The canonical P BrainZ SVG does not contain its expected background container."
+        "The canonical PBrainZ SVG does not contain its expected background container."
     )
 
 

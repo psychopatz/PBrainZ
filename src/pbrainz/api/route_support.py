@@ -13,6 +13,10 @@ from pbrainz.config import (
 )
 from pbrainz.database import SettingsDatabase
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.template_profiles import (
+    active_template_profile,
+    load_template_profiles,
+)
 
 
 def _registry(request: Request) -> ProviderRegistry:
@@ -47,12 +51,18 @@ def _ui_status(request: Request) -> UIStatus:
             # keeps an unrefreshed provider blank instead of showing another
             # provider's configured/default model.
             models=list(_cached_models(request, provider_name)),
+            configured_models=list(settings.models_for(provider_name)),
             model_source=_model_source(database, provider_name),
             models_updated_at=_models_updated_at(database, provider_name),
             selected=provider_name == default_provider,
         )
         for provider_name in registry.provider_names
     ]
+    template_profiles = load_template_profiles(settings.template_profiles_json)
+    active_profile = active_template_profile(
+        settings.template_profiles_json,
+        settings.active_template_profile_id,
+    )
     return UIStatus(
         service=request.app.title,
         host=settings.host,
@@ -73,6 +83,8 @@ def _ui_status(request: Request) -> UIStatus:
         game_bridge_setting_enabled=game_bridge_setting_enabled,
         bridge_worker_enabled=bool(controller_status["worker_enabled"]),
         bridge_worker_running=bool(controller_status["worker_running"]),
+        template_profiles=[profile.as_dict() for profile in template_profiles],
+        active_template_profile_id=active_profile.id,
         tts_synthesis_workers=settings.tts_synthesis_workers,
         tts_model_cache_size=settings.tts_model_cache_size,
         tts_max_simultaneous_playback=settings.tts_max_simultaneous_playback,
@@ -87,9 +99,9 @@ def _ui_status(request: Request) -> UIStatus:
 def _available_models(request: Request, provider_name: str) -> tuple[str, ...]:
     settings = request.app.state.settings
     catalog = _catalog_rows(request, provider_name)
-    if catalog:
-        return tuple(row["model_id"] for row in catalog)
-    return settings.models_for(provider_name)
+    model_ids = [row["model_id"] for row in catalog]
+    model_ids.extend(settings.models_for(provider_name))
+    return tuple(dict.fromkeys(model_ids))
 
 
 def _cached_models(request: Request, provider_name: str) -> tuple[str, ...]:

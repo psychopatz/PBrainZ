@@ -1,8 +1,10 @@
 """Canonical product branding and portable-runtime names."""
 
-PRODUCT_NAME = "P BrainZ"
+from .version import __version__
+
+PRODUCT_NAME = "PBrainZ"
 PRODUCT_BINARY_NAME = "PBrainZ"
-PRODUCT_VERSION = "0.1.0"
+PRODUCT_VERSION = __version__
 PROJECT_NAME = "p-brainz"
 DATABASE_NAME = "pbrainz.db"
 DATABASE_ENV = "PBRAINZ_DB"

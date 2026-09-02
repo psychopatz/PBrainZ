@@ -14,9 +14,12 @@ from pbrainz.conversation_service import ConversationRequest, ConversationServic
 from pbrainz.exceptions import ProviderError
 from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.semantic_tool_protocol import (
+    ensure_identity_intent,
     ensure_social_intent,
     extract_text_tool_calls,
     is_social_insult,
+    is_provider_scaffold,
+    strip_provider_scaffold,
 )
 from pbrainz.tts import TTSService
 
@@ -28,7 +31,7 @@ from .delivery import (
     _speech_finished_callback,
     _speech_started_callback,
 )
-from .protocol import MAX_DELIVERY_TEXT, NAMESPACE
+from .protocol import NAMESPACE
 from .state import BridgeState
 from .voice import voice_channel_available
 
@@ -39,7 +42,13 @@ _NPC_META_RESPONSE_RE = re.compile(
     r"\bas an ai\b|\b(?:language model|large language model)\b|"
     r"\b(?:openai|chatgpt)\b|"
     r"\b(?:i do not|i don't) have (?:a )?(?:personal )?(?:identity|name)\b|"
-    r"\b(?:i cannot|i can't) engage with .*?(?:hostile|demeaning)\b)",
+    r"\b(?:i cannot|i can't) engage with .*?(?:hostile|demeaning)\b|"
+    r"\bself[- ]correction\s+check\b|"
+    r"\b(?:the\s+)?last\s+turn['’]s\s+instructions\b|"
+    r"\b(?:actual\s+)?prompt\s+for\s+the\s+final\s+response\b|"
+    r"\bwill\s+assume\s+the\s+player['’]s\s+last\s+message\b|"
+    r"\bplayer['’]s\s+last\s+message\s*:|"
+    r"\brequired\s+action\s*:)",
     re.IGNORECASE,
 )
 
@@ -138,12 +147,27 @@ async def complete_and_deliver(
             semantic_tool_calls = ensure_social_intent(
                 semantic_tool_calls, request
             )
+            semantic_tool_calls = ensure_identity_intent(
+                semantic_tool_calls, request
+            )
             response_text = sanitize_npc_response(
                 response_text,
                 request,
                 semantic_tool_calls,
             )
         presentation_reason: str | None = None
+        if (
+            structured
+            and conversation_service
+            and (
+                conversation_result.diagnostics.get("empty_response_retry")
+                == "text_only_authorized_tools"
+                or conversation_result.diagnostics.get("contextual_response_retry")
+                == "explicit_social_subtype"
+            )
+            and response_text
+        ):
+            presentation_reason = "llm_tool_response_repair"
         if not response_text and semantic_tool_calls:
             # Providers commonly return a tool-only assistant turn.  The game
             # will execute the semantic call, but it still needs one shared
@@ -151,12 +175,15 @@ async def complete_and_deliver(
             # Keep this deliberately non-committal: acceptance is decided by
             # the game after delivery, so this must not claim that the action
             # already succeeded.
-            response_text = tool_ack_text(request)
+            response_text = tool_ack_text(request, semantic_tool_calls)
             presentation_reason = "tool_ack"
         arguments: dict[str, Any] = {
             "request_id": request_id,
             "npc_id": npc_id,
-            "response_text": response_text[:MAX_DELIVERY_TEXT],
+            # Dialogue is bounded by the bridge response packet size, not by
+            # an arbitrary per-field character limit.  The latter used to
+            # silently cut valid NPC replies before Project Hoomans saw them.
+            "response_text": response_text,
             "finish_reason": str(result.finish_reason or "unknown")[:128],
             "tool_call_count": len(result.tool_calls or []),
         }
@@ -221,6 +248,9 @@ async def complete_and_deliver(
         if structured:
             fallback_calls = ensure_social_intent(
                 [], request, reason="provider_request_failed"
+            )
+            fallback_calls = ensure_identity_intent(
+                fallback_calls, request, reason="provider_request_failed"
             )
             if fallback_calls:
                 arguments["semantic_tool_calls"] = fallback_calls
@@ -326,15 +356,29 @@ def request_message(request: dict[str, Any]) -> str:
     return ""
 
 
-def tool_ack_text(request: dict[str, Any]) -> str:
+def tool_ack_text(
+    request: dict[str, Any],
+    semantic_tool_calls: list[dict[str, Any]] | None = None,
+) -> str:
     """Return safe dialogue for a tool-only turn before game validation."""
     context = request.get("conversation_context") or request.get("context")
     if isinstance(context, dict):
         for key in ("tool_ack_text", "toolAckText"):
             value = context.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()[:MAX_DELIVERY_TEXT]
-    return "I'll check that now."
+                return value.strip()
+    names = {
+        str(call.get("name") or "").strip()
+        for call in semantic_tool_calls or []
+        if isinstance(call, dict)
+    }
+    if "ask_name" in names:
+        return "Sure. Let me introduce myself."
+    if "social_react" in names:
+        return "I hear you."
+    if any(name.startswith("order_") for name in names):
+        return "All right."
+    return "Give me a moment."
 
 
 def sanitize_npc_response(
@@ -344,9 +388,15 @@ def sanitize_npc_response(
 ) -> str:
     """Keep provider identity/policy boilerplate out of NPC dialogue."""
     response = str(response or "").strip()
-    if not response or not _NPC_META_RESPONSE_RE.search(response):
+    has_meta = bool(response and _NPC_META_RESPONSE_RE.search(response))
+    has_scaffold = is_provider_scaffold(response)
+    if not response or not (has_meta or has_scaffold):
         return response
     fallback = npc_fallback_response(request, semantic_tool_calls)
+    if has_scaffold and not has_meta:
+        cleaned = strip_provider_scaffold(response)
+        if cleaned:
+            return cleaned
     LOGGER.warning(
         "NPC provider response replaced meta boilerplate npc=%s request=%s reaction=%s",
         str(request.get("npc_id") or "unknown"),
@@ -380,7 +430,9 @@ def npc_fallback_response(
     fallback = {
         "insult": "Watch your mouth.",
         "praise": "I appreciate that.",
+        "admire": "That means something coming from you.",
         "comfort": "Thanks. I needed that.",
+        "apologize": "All right. Let's move on.",
         "apology": "Fine. Just don't do it again.",
         "flirt": "Careful. You might get the wrong idea.",
         "greeting": "Hello.",

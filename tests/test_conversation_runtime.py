@@ -138,3 +138,13 @@ def test_voice_binding_cache_is_session_scoped_and_bounded() -> None:
     cache.remember("session-b", VoiceBinding("npc-b", "VoiceMale:0"))
     assert len(cache) == 1
     assert cache.get("session-a", "npc-a") is None
+
+
+def test_voice_binding_cache_separates_player_and_npc_identity() -> None:
+    cache = VoiceBindingCache()
+    npc = VoiceBinding("shared-id", "VoiceMale:0")
+    player = VoiceBinding("shared-id", "VoiceFemale:1", speaker_kind="player")
+    cache.remember("session", npc)
+    cache.remember("session", player)
+    assert cache.get("session", "shared-id", "npc") == npc
+    assert cache.get("session", "shared-id", "player") == player

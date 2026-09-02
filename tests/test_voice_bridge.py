@@ -20,7 +20,9 @@ class FakeTTS:
     def __init__(self) -> None:
         self.enqueued = []
 
-    def resolve_voice_binding(self, _conversation_id, _npc_id, binding):
+    def resolve_voice_binding(
+        self, _conversation_id, _speaker_id, binding, _speaker_kind="npc"
+    ):
         return binding
 
     def can_synthesize(self, binding) -> bool:
@@ -112,6 +114,34 @@ def test_voice_packet_maps_to_existing_utterance_contract() -> None:
     assert utterance.speaker_npc_uuid == "npc-one"
     assert utterance.voice_binding is not None
     assert utterance.voice_binding.slot == "VoiceFemale:2"
+
+
+def test_player_voice_packet_uses_player_identity_and_binding() -> None:
+    value = packet()
+    value.update(
+        {
+            "utterance_id": "voice:player:1",
+            "message_id": "message:player:1",
+            "speaker_id": "player-one",
+            "speaker_kind": "player",
+            "player_uuid": "player-one",
+            "voice_binding": {
+                "speaker_id": "player-one",
+                "speaker_kind": "player",
+                "player_uuid": "player-one",
+                "slot": "VoiceFemale:1",
+                "pitch": -7,
+            },
+        }
+    )
+    utterance = utterance_from_packet(value, FakeTTS())
+    assert utterance is not None
+    assert utterance.speaker_id == "player-one"
+    assert utterance.speaker_kind == "player"
+    assert utterance.speaker_key == "player:player-one"
+    assert utterance.voice_binding is not None
+    assert utterance.voice_binding.speaker_kind == "player"
+    assert utterance.voice_binding.pitch == -7
 
 
 def test_expired_voice_packet_is_discarded() -> None:

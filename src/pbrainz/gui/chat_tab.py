@@ -1,4 +1,4 @@
-"""Direct provider chat tab for testing P BrainZ providers."""
+"""Direct provider chat tab for testing PBrainZ providers."""
 
 from __future__ import annotations
 

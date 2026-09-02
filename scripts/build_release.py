@@ -11,11 +11,11 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
 import sys
-import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +24,7 @@ PACKAGING_ROOT = PROJECT_ROOT / "packaging"
 BUILD_ROOT = PROJECT_ROOT / "build" / "release"
 DEFAULT_OUTPUT = PROJECT_ROOT / "dist" / "release"
 PRODUCT_BINARY_NAME = "PBrainZ"
+VERSION_FILE = PROJECT_ROOT / "src" / "pbrainz" / "version.py"
 APPIMAGE_TOOL_URL = (
     "https://github.com/AppImage/appimagetool/releases/download/continuous/"
     "appimagetool-{architecture}.AppImage"
@@ -33,7 +34,6 @@ APPIMAGE_TOOL_URL = (
 def main() -> int:
     args = _parse_args()
     target = _resolve_target(args.target)
-    version = _release_version(args.version)
     output_dir = Path(args.output_dir).expanduser().resolve()
     configured_appimagetool = (
         Path(args.appimagetool).expanduser().resolve() if args.appimagetool else None
@@ -44,18 +44,24 @@ def main() -> int:
     staging.mkdir(parents=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "data").mkdir(exist_ok=True)
+    version, previous_version = _prepare_build_version(args.version, args.bump)
 
-    icon_assets = _prepare_icon_assets(staging)
-    bundle = _build_pyinstaller(target, staging, icon_assets)
-    if target == "exe":
-        artifact = output_dir / f"{PRODUCT_BINARY_NAME}-{version}-{_platform_tag()}.exe"
-        shutil.copy2(bundle, artifact)
-    else:
-        artifact = _build_appimage(
-            bundle, staging, output_dir, version, configured_appimagetool, icon_assets
-        )
-    print(f"Release artifact: {artifact}")
-    return 0
+    try:
+        icon_assets = _prepare_icon_assets(staging)
+        bundle = _build_pyinstaller(target, staging, icon_assets)
+        if target == "exe":
+            artifact = output_dir / f"{PRODUCT_BINARY_NAME}-{version}-{_platform_tag()}.exe"
+            shutil.copy2(bundle, artifact)
+        else:
+            artifact = _build_appimage(
+                bundle, staging, output_dir, version, configured_appimagetool, icon_assets
+            )
+        print(f"Release artifact: {artifact}")
+        return 0
+    except BaseException:
+        if previous_version is not None:
+            _write_version(previous_version)
+        raise
 
 
 def _parse_args() -> argparse.Namespace:
@@ -66,7 +72,16 @@ def _parse_args() -> argparse.Namespace:
         default="auto",
         help="Artifact type; auto selects exe on Windows and AppImage on Linux.",
     )
-    parser.add_argument("--version", help="Release version used in the artifact filename.")
+    parser.add_argument(
+        "--version",
+        help="Explicit version to package; overrides automatic bumping (for example, v0.2.0).",
+    )
+    parser.add_argument(
+        "--bump",
+        choices=("patch", "minor", "major", "none"),
+        default="patch",
+        help="Automatic version bump for local builds; default: patch. Use none to rebuild unchanged.",
+    )
     parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT),
@@ -95,15 +110,76 @@ def _resolve_target(requested: str) -> str:
     return target
 
 
-def _release_version(requested: str | None) -> str:
-    if requested:
-        value = requested.removeprefix("v")
-    else:
-        with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
-            value = tomllib.load(handle)["project"]["version"]
-    return "".join(
-        character if character.isalnum() or character in ".-_" else "-" for character in value
+_VERSION_ASSIGNMENT_RE = re.compile(
+    r"(?m)^(?P<prefix>\s*__version__\s*=\s*[\"'])(?P<version>[^\"']+)(?P<suffix>[\"']\s*)$"
+)
+_SEMVER_RE = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?P<suffix>[-+][0-9A-Za-z.-]+)?$"
+)
+
+
+def _read_version() -> str:
+    match = _VERSION_ASSIGNMENT_RE.search(VERSION_FILE.read_text(encoding="utf-8"))
+    if match is None:
+        raise SystemExit(f"Could not find __version__ in {VERSION_FILE}")
+    return match.group("version")
+
+
+def _validate_version(value: str) -> str:
+    normalized = value.strip().removeprefix("v")
+    if _SEMVER_RE.fullmatch(normalized) is None:
+        raise SystemExit(f"Version must be semantic MAJOR.MINOR.PATCH, got: {value!r}")
+    return normalized
+
+
+def _bump_version(current: str, bump: str) -> str:
+    match = _SEMVER_RE.fullmatch(_validate_version(current))
+    assert match is not None
+    major = int(match.group("major"))
+    minor = int(match.group("minor"))
+    patch = int(match.group("patch"))
+    if bump == "major":
+        major, minor, patch = major + 1, 0, 0
+    elif bump == "minor":
+        minor, patch = minor + 1, 0
+    elif bump == "patch":
+        patch += 1
+    elif bump != "none":
+        raise SystemExit(f"Unknown version bump: {bump!r}")
+    return f"{major}.{minor}.{patch}"
+
+
+def _write_version(version: str) -> None:
+    version = _validate_version(version)
+    source = VERSION_FILE.read_text(encoding="utf-8")
+    updated, count = _VERSION_ASSIGNMENT_RE.subn(
+        lambda match: f'{match.group("prefix")}{version}{match.group("suffix")}',
+        source,
+        count=1,
     )
+    if count != 1:
+        raise SystemExit(f"Could not update __version__ in {VERSION_FILE}")
+    VERSION_FILE.write_text(updated, encoding="utf-8")
+
+
+def _release_version(requested: str | None, bump: str = "none") -> str:
+    """Return the normalized version that a build should package."""
+    return _validate_version(requested) if requested else _bump_version(_read_version(), bump)
+
+
+def _prepare_build_version(
+    requested: str | None,
+    bump: str,
+) -> tuple[str, str | None]:
+    """Set the package version for this build and return its rollback value."""
+    current = _read_version()
+    version = _release_version(requested, bump)
+    if version == current:
+        return version, None
+    _write_version(version)
+    print(f"Version: {current} -> {version}")
+    return version, current
 
 
 def _prepare_icon_assets(staging: Path) -> Path:

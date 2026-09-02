@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_path: str | None = None
 
-    default_provider: str = "openai"
+    default_provider: str = "gemini"
     default_model: str | None = None
     enabled_providers: str = "openai,ollama,lmstudio,custom,horde,gemini"
     request_timeout: float = Field(default=120.0, gt=0)
@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     tool_rag_enabled: bool = True
     tool_retrieval_limit: int = Field(default=8, ge=1, le=32)
     tool_budget_chars: int = Field(default=2600, ge=400, le=20000)
+    template_profiles_json: str = "{}"
+    active_template_profile_id: str = "native-chat"
     llm_diagnostics: bool = False
     llm_trace_capture: bool = False
 

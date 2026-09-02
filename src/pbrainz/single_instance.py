@@ -1,4 +1,4 @@
-"""Process-level lock preventing multiple P BrainZ runtimes per install."""
+"""Process-level lock preventing multiple PBrainZ runtimes per install."""
 
 from __future__ import annotations
 

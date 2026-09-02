@@ -12,12 +12,12 @@ if [[ ! -x "${VENV_PYTHON}" ]]; then
         exit 1
     fi
 
-    echo "First run: creating the private P BrainZ environment..."
+    echo "First run: creating the private PBrainZ environment..."
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 
 if ! "${VENV_PYTHON}" -c 'import fastapi, google.genai, openai, pydantic_settings, uvicorn, pbrainz' >/dev/null 2>&1; then
-    echo "First run: installing P BrainZ dependencies..."
+    echo "First run: installing PBrainZ dependencies..."
     "${VENV_PYTHON}" -m ensurepip --upgrade >/dev/null 2>&1 || true
     "${VENV_PYTHON}" -m pip install --upgrade pip
     "${VENV_PYTHON}" -m pip install "${PROJECT_ROOT}"

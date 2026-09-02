@@ -1,3 +1,5 @@
-"""P BrainZ modular local AI gateway for Project Zomboid mods."""
+"""PBrainZ modular local AI gateway for Project Zomboid mods."""
 
-__version__ = "0.1.0"
+from .version import __version__
+
+__all__ = ["__version__"]

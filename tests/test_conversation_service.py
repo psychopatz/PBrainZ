@@ -18,6 +18,18 @@ class FakeProviders:
         return CompletionResult(request.model, "I remember that.")
 
 
+class HordeTemplateProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, provider, model):
+        return "horde", model if model not in {"default", "auto"} else "horde-model"
+
+    async def complete(self, provider, request):
+        self.requests.append((provider, request))
+        return CompletionResult(request.model, "I am here.")
+
+
 class EmptyThenTextProviders:
     def __init__(self) -> None:
         self.requests = []
@@ -30,6 +42,60 @@ class EmptyThenTextProviders:
         if len(self.requests) == 1:
             return CompletionResult(request.model, "", finish_reason="stop")
         return CompletionResult(request.model, "I am here.")
+
+
+class AuthorizedToolOnlyThenTextProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        self.requests.append((provider, request))
+        if len(self.requests) == 1:
+            return CompletionResult(
+                request.model,
+                "",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    {
+                        "id": "social-call",
+                        "function": {
+                            "name": "social_react",
+                            "arguments": '{"kind":"admire"}',
+                        },
+                    }
+                ],
+            )
+        return CompletionResult(request.model, "You have my respect.")
+
+
+class ExplicitSocialGenericThenTextProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        self.requests.append((provider, request))
+        if len(self.requests) == 1:
+            return CompletionResult(
+                request.model,
+                "I'll check that now.",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    {
+                        "id": "sexual-call",
+                        "function": {
+                            "name": "social_react",
+                            "arguments": '{"kind":"insult"}',
+                        },
+                    }
+                ],
+            )
+        return CompletionResult(request.model, "No. Back off.")
 
 
 class UnknownToolThenTextProviders:
@@ -70,6 +136,18 @@ class TextEmptyTextProviders:
         return CompletionResult(request.model, "The plan still stands.")
 
 
+class HordeScaffoldProviders:
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        return CompletionResult(
+            request.model,
+            '"Ugh, you look terrible."\n\nInstruction:\n'
+            "dude you look terrible\n\nResponse",
+        )
+
+
 @pytest.mark.asyncio
 async def test_structured_conversation_owns_history_and_consolidates(tmp_path) -> None:
     providers = FakeProviders()
@@ -107,11 +185,72 @@ async def test_structured_conversation_owns_history_and_consolidates(tmp_path) -
     assert second.diagnostics["memory_count"] >= 1
 
 
+@pytest.mark.asyncio
+async def test_horde_request_uses_dedicated_instruct_profile(tmp_path) -> None:
+    providers = HordeTemplateProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="horde",
+        context_max_chars=4000,
+    )
+    service = ConversationService(settings, providers)
+
+    result = await service.complete(
+        ConversationRequest(
+            request_id="horde-request",
+            scope=MemoryScope("world-horde", "player-horde", "npc-horde"),
+            session_id="horde-session",
+            message="What's your name?",
+            npc_name="Harley",
+            player_name="Alex",
+            provider="horde",
+        )
+    )
+
+    assert result.completion.text == "I am here."
+    assert len(providers.requests) == 1
+    provider, request = providers.requests[0]
+    assert provider == "horde"
+    assert len(request.messages) == 1
+    assert request.messages[0].role == "user"
+    assert "User: What's your name?" in (request.messages[0].content or "")
+    assert request.stop == ["\nUser: ", "\n### Instruction:"]
+    assert request.metadata["template_profile_id"] == "instruct-text"
+    assert request.metadata["template_profile_requested_id"] == "native-chat"
+    assert request.metadata["template_profile_auto_selected"] is True
+
+
 def test_structured_request_rejects_missing_scope() -> None:
     with pytest.raises(ValueError):
         ConversationRequest.from_mapping(
             {"request_id": "one", "conversation_context": {"message": "hello"}}
         )
+
+
+@pytest.mark.asyncio
+async def test_horde_prompt_scaffold_is_filtered_before_memory_write(tmp_path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, HordeScaffoldProviders())
+    scope = MemoryScope("world-one", "player-one", "npc-one")
+    request = ConversationRequest(
+        request_id="horde-scaffold",
+        scope=scope,
+        session_id="session-one",
+        message="dude you look terrible",
+        npc_name="Emilio",
+        player_name="Alex",
+    )
+
+    result = await service.complete(request)
+
+    assert result.completion.text == '"Ugh, you look terrible."'
+    assert result.diagnostics["provider_scaffold_filtered"] is True
+    turns = service._store("world-one").recent_turns("session-one", scope, 8)
+    assert [turn.role for turn in turns] == ["user", "assistant"]
+    assert "Instruction:" not in turns[-1].content
 
 
 @pytest.mark.asyncio
@@ -145,6 +284,79 @@ async def test_empty_provider_candidate_retries_without_tools(tmp_path) -> None:
     assert result.diagnostics["empty_response_retry"] == "text_only"
     assert len(providers.requests) == 2
     assert providers.requests[0][1].tools
+    assert providers.requests[1][1].tools is None
+
+
+@pytest.mark.asyncio
+async def test_authorized_tool_only_candidate_gets_text_repair_without_losing_tool(
+    tmp_path,
+) -> None:
+    providers = AuthorizedToolOnlyThenTextProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    result = await service.complete(
+        ConversationRequest(
+            request_id="repair-authorized-tool",
+            scope=MemoryScope("world-one", "player-one", "npc-one"),
+            session_id="session-one",
+            message="I admire you.",
+            available_tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "social_react",
+                        "description": "React socially.",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ),
+        )
+    )
+
+    assert result.completion.text == "You have my respect."
+    assert result.completion.tool_calls[0]["function"]["name"] == "social_react"
+    assert result.diagnostics["empty_response_retry"] == "text_only_authorized_tools"
+    assert len(providers.requests) == 2
+    assert providers.requests[1][1].tools is None
+    assert providers.requests[1][1].max_tokens == 120
+
+
+@pytest.mark.asyncio
+async def test_explicit_social_generic_reply_gets_one_contextual_repair(
+    tmp_path,
+) -> None:
+    providers = ExplicitSocialGenericThenTextProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    result = await service.complete(
+        ConversationRequest(
+            request_id="repair-sexual-social",
+            scope=MemoryScope("world-one", "player-one", "npc-one"),
+            session_id="session-one",
+            message="I want to have sex with you.",
+            available_tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "social_react",
+                        "description": "React socially.",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ),
+        )
+    )
+
+    assert result.completion.text == "No. Back off."
+    assert result.completion.tool_calls[0]["function"]["name"] == "social_react"
+    assert result.diagnostics["contextual_response_retry"] == "explicit_social_subtype"
+    assert len(providers.requests) == 2
     assert providers.requests[1][1].tools is None
 
 

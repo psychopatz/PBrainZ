@@ -21,6 +21,9 @@ from pbrainz.api.models import (
     UIModelRefreshRequest,
     UISettingsRequest,
     UIStatus,
+    UITemplateModelAddRequest,
+    UITemplateProfileActionRequest,
+    UITemplateProfileSaveRequest,
     UITTSSettingsRequest,
     UITTSTestRequest,
     UITTSVoiceInstallRequest,
@@ -47,6 +50,16 @@ from pbrainz.memory import (
 )
 from pbrainz.paths import normalize_zomboid_path
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.template_profiles import (
+    active_template_profile,
+    delete_template_profile,
+    load_template_profiles,
+    normalize_profile,
+    profile_by_id,
+    reset_template_profile,
+    serialize_template_profiles,
+    upsert_template_profile,
+)
 from pbrainz.tts import TTSException, TTSService
 
 from .response_format import _completion_response
@@ -212,6 +225,177 @@ async def refresh_ui_models(request: Request, body: UIModelRefreshRequest) -> UI
         )
     await request.app.state.model_catalog.refresh_provider(provider_name)
     return _ui_status(request)
+
+
+@router.post("/api/template-models", response_model=UIStatus, tags=["control-panel"])
+async def add_template_model(
+    request: Request, body: UITemplateModelAddRequest
+) -> UIStatus:
+    """Add a model ID to an enabled provider without contacting its API."""
+
+    settings = request.app.state.settings
+    registry: ProviderRegistry = _registry(request)
+    database: SettingsDatabase = request.app.state.database
+    provider_name = body.provider.strip().lower()
+    model_name = body.model.strip()
+    if provider_name not in registry.provider_names:
+        enabled = ", ".join(registry.provider_names) or "none"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown or disabled provider '{provider_name}'. Enabled: {enabled}.",
+        )
+    if not model_name or any(char in model_name for char in ",\r\n"):
+        raise HTTPException(
+            status_code=400,
+            detail="Model ID must be one non-empty value without commas or line breaks.",
+        )
+    setting_name = f"{provider_name}_models"
+    configured_models = list(settings.models_for(provider_name))
+    if model_name not in configured_models:
+        configured_models.append(model_name)
+        model_value = ",".join(configured_models)
+        setattr(settings, setting_name, model_value)
+        try:
+            database.save_settings({setting_name: model_value})
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not save template model: {error}",
+            ) from error
+        LOGGER.info("template model added provider=%s model=%s", provider_name, model_name)
+    return _ui_status(request)
+
+
+@router.post("/api/template-profiles", response_model=UIStatus, tags=["control-panel"])
+async def save_ui_template_profile(
+    request: Request, body: UITemplateProfileSaveRequest
+) -> UIStatus:
+    """Persist one editable NPC prompt-template profile."""
+
+    settings = request.app.state.settings
+    database: SettingsDatabase = request.app.state.database
+    try:
+        profile = normalize_profile(body.profile.model_dump())
+        profiles = upsert_template_profile(
+            load_template_profiles(settings.template_profiles_json), profile
+        )
+        serialized = serialize_template_profiles(profiles)
+        database.save_settings({"template_profiles_json": serialized})
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not save template profile: {error}",
+        ) from error
+    settings.template_profiles_json = serialized
+    _apply_active_template_profile(request)
+    LOGGER.info("template profile saved id=%s mode=%s", profile.id, profile.mode)
+    return _ui_status(request)
+
+
+@router.post("/api/template-profiles/active", response_model=UIStatus, tags=["control-panel"])
+async def activate_ui_template_profile(
+    request: Request, body: UITemplateProfileActionRequest
+) -> UIStatus:
+    """Select the prompt-template profile used by new NPC turns."""
+
+    settings = request.app.state.settings
+    profiles = load_template_profiles(settings.template_profiles_json)
+    profile = profile_by_id(profiles, body.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Template profile was not found.")
+    try:
+        request.app.state.database.save_settings(
+            {"active_template_profile_id": profile.id}
+        )
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not activate template profile: {error}",
+        ) from error
+    settings.active_template_profile_id = profile.id
+    _apply_active_template_profile(request)
+    LOGGER.info("template profile activated id=%s", profile.id)
+    return _ui_status(request)
+
+
+@router.post("/api/template-profiles/delete", response_model=UIStatus, tags=["control-panel"])
+async def delete_ui_template_profile(
+    request: Request, body: UITemplateProfileActionRequest
+) -> UIStatus:
+    """Delete one custom profile and fall back safely when it was active."""
+
+    settings = request.app.state.settings
+    profiles = load_template_profiles(settings.template_profiles_json)
+    try:
+        profiles = delete_template_profile(profiles, body.profile_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Template profile was not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    active_id = settings.active_template_profile_id
+    if not profile_by_id(profiles, active_id):
+        active_id = profiles[0].id
+    serialized = serialize_template_profiles(profiles)
+    try:
+        request.app.state.database.save_settings(
+            {
+                "template_profiles_json": serialized,
+                "active_template_profile_id": active_id,
+            }
+        )
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not delete template profile: {error}",
+        ) from error
+    settings.template_profiles_json = serialized
+    settings.active_template_profile_id = active_id
+    _apply_active_template_profile(request)
+    LOGGER.info("template profile deleted id=%s", body.profile_id)
+    return _ui_status(request)
+
+
+@router.post("/api/template-profiles/reset", response_model=UIStatus, tags=["control-panel"])
+async def reset_ui_template_profile(
+    request: Request, body: UITemplateProfileActionRequest
+) -> UIStatus:
+    """Restore a shipped profile while keeping its active selection."""
+
+    settings = request.app.state.settings
+    profiles = load_template_profiles(settings.template_profiles_json)
+    try:
+        profiles = reset_template_profile(profiles, body.profile_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Template profile was not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    serialized = serialize_template_profiles(profiles)
+    try:
+        request.app.state.database.save_settings({"template_profiles_json": serialized})
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not reset template profile: {error}",
+        ) from error
+    settings.template_profiles_json = serialized
+    _apply_active_template_profile(request)
+    LOGGER.info("template profile reset id=%s", body.profile_id)
+    return _ui_status(request)
+
+
+def _apply_active_template_profile(request: Request) -> None:
+    """Push a profile mutation into the live conversation service immediately."""
+
+    service = getattr(request.app.state, "conversation_service", None)
+    if service is None or not hasattr(service, "set_template_profile"):
+        return
+    settings = request.app.state.settings
+    service.set_template_profile(
+        active_template_profile(
+            settings.template_profiles_json,
+            settings.active_template_profile_id,
+        )
+    )
 
 
 @router.get("/api/logs", response_model=UILogResponse, tags=["control-panel"])
