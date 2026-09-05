@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from dataclasses import replace
 from json import JSONDecodeError
 from typing import Any
 
@@ -17,8 +19,8 @@ from pbrainz.semantic_tool_protocol import (
     ensure_identity_intent,
     ensure_social_intent,
     extract_text_tool_calls,
-    is_social_insult,
     is_provider_scaffold,
+    is_social_insult,
     strip_provider_scaffold,
 )
 from pbrainz.tts import TTSService
@@ -52,6 +54,192 @@ _NPC_META_RESPONSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_AMBIENT_SENTENCE_RE = re.compile(
+    r"(.+?[.!?](?:[\"')\]]+)?)(?:\s+|$)",
+    re.DOTALL,
+)
+_AMBIENT_WORD_RE = re.compile(r"\S+")
+
+
+class _AmbientSpeechStream:
+    """Turn safe ambient response deltas into ordered local TTS utterances."""
+
+    MAX_CHUNK_CHARS = 320
+    START_WAIT_SECONDS = 4.0
+
+    def __init__(
+        self,
+        tts_service: TTSService,
+        request: dict[str, Any],
+        request_id: str,
+        npc_id: str,
+    ) -> None:
+        self.tts_service = tts_service
+        self.request = request
+        self.request_id = request_id
+        self.npc_id = npc_id
+        self._buffer = ""
+        self._chunk_index = 0
+        self.started = False
+        self.accepted_chunks = 0
+        self.disabled = False
+        self.failed = False
+        self._started_event = asyncio.Event()
+        self.conversation_ids: set[str] = set()
+
+    async def push(self, delta: str) -> None:
+        if self.disabled or not delta:
+            return
+        self._buffer += str(delta)
+        await self._flush_ready()
+
+    async def finish(self) -> None:
+        if self.disabled:
+            self._buffer = ""
+            return
+        while self._buffer.strip():
+            chunk = self._take_sentence()
+            if chunk is None:
+                chunk = self._buffer.strip()
+                self._buffer = ""
+            if chunk is None:
+                break
+            await self._enqueue(chunk)
+
+    def abort(self) -> None:
+        self._buffer = ""
+        self.disabled = True
+        self.failed = True
+        self._started_event.set()
+
+    async def cancel_local_audio(self) -> None:
+        """Remove chunks already queued when the game rejected the response."""
+
+        self.abort()
+        cancel = getattr(self.tts_service, "cancel_conversation", None)
+        if not callable(cancel):
+            return
+        for conversation_id in tuple(self.conversation_ids):
+            try:
+                await cancel(conversation_id)
+            except Exception as error:
+                LOGGER.warning(
+                    "ambient streaming TTS cancellation failed npc=%s request=%s: %s",
+                    self.npc_id,
+                    self.request_id,
+                    error,
+                )
+
+    async def wait_for_playback_start(self) -> bool:
+        """Only claim Core's voice channel after local audio really starts."""
+
+        if self.started:
+            return True
+        if not self.accepted_chunks or self.failed:
+            return False
+        try:
+            await asyncio.wait_for(
+                self._started_event.wait(), timeout=self.START_WAIT_SECONDS
+            )
+        except TimeoutError:
+            return False
+        return self.started and not self.failed
+
+    async def _flush_ready(self) -> None:
+        while not self.disabled:
+            chunk = self._take_sentence()
+            if chunk is None:
+                return
+            await self._enqueue(chunk)
+
+    def _take_sentence(self) -> str | None:
+        match = _AMBIENT_SENTENCE_RE.search(self._buffer)
+        if not match:
+            return None
+        raw_chunk = match.group(1).strip()
+        if not raw_chunk:
+            return None
+        remainder = self._buffer[match.end() :].lstrip()
+        if len(raw_chunk) > self.MAX_CHUNK_CHARS:
+            split_at = raw_chunk.rfind(" ", 0, self.MAX_CHUNK_CHARS + 1)
+            split_at = split_at if split_at > 0 else self.MAX_CHUNK_CHARS
+            chunk = raw_chunk[:split_at].strip()
+            tail = raw_chunk[split_at:].lstrip()
+            self._buffer = tail + ((" " + remainder) if remainder else "")
+            return chunk
+        self._buffer = remainder
+        return raw_chunk
+
+    async def _enqueue(self, text: str) -> None:
+        if self.disabled or not text.strip():
+            return
+        utterance = _build_tts_utterance(
+            self.tts_service,
+            self.request,
+            f"{self.request_id}:chunk:{self._chunk_index}",
+            self.npc_id,
+            text,
+        )
+        if utterance is None:
+            self.disabled = True
+            return
+        utterance = replace(
+            utterance,
+            utterance_id=f"{utterance.utterance_id}:ambient:{self._chunk_index}",
+            turn=utterance.turn + self._chunk_index,
+        )
+        self.conversation_ids.add(utterance.conversation_id)
+        try:
+            accepted = await self.tts_service.enqueue(
+                utterance,
+                on_started=self._on_started,
+                on_failed=self._on_failed,
+                wait_for_capacity=True,
+            )
+        except Exception as error:
+            self.disabled = True
+            LOGGER.warning(
+                "ambient streaming TTS stopped npc=%s request=%s: %s",
+                self.npc_id,
+                self.request_id,
+                error,
+            )
+            return
+        if not accepted:
+            self.disabled = True
+            self.failed = True
+            self._started_event.set()
+            LOGGER.info(
+                "ambient streaming TTS unavailable npc=%s request=%s reason=%s",
+                self.npc_id,
+                self.request_id,
+                self.tts_service.last_error or "queue_rejected",
+            )
+            return
+        self.accepted_chunks += 1
+        self._chunk_index += 1
+        LOGGER.info(
+            "ambient streaming TTS chunk queued npc=%s request=%s chunk=%s words=%s",
+            self.npc_id,
+            self.request_id,
+            self._chunk_index,
+            len(_AMBIENT_WORD_RE.findall(text)),
+        )
+
+    async def _on_started(self, _utterance: Utterance) -> None:
+        self.started = True
+        self._started_event.set()
+
+    async def _on_failed(self, _utterance: Utterance, error: Exception) -> None:
+        self.failed = True
+        self._started_event.set()
+        LOGGER.warning(
+            "ambient streaming TTS chunk failed npc=%s request=%s: %s",
+            self.npc_id,
+            self.request_id,
+            error,
+        )
+
 
 async def complete_and_deliver(
     providers: ProviderRegistry,
@@ -82,6 +270,8 @@ async def complete_and_deliver(
             source="project-hoomans.bridge",
         )
     tts_utterance: Utterance | None = None
+    ambient_tts: _AmbientSpeechStream | None = None
+    tts_managed = False
     structured = bool(
         request.get("conversation_context")
         or request.get("world_uuid")
@@ -101,7 +291,26 @@ async def complete_and_deliver(
             if conversation_service is None:
                 raise ValueError("conversation service is unavailable")
             conversation_request = ConversationRequest.from_mapping(request)
-            conversation_result = await conversation_service.complete(conversation_request)
+            if (
+                tts_service
+                and tts_service.enabled
+                and _is_ambient_request(request)
+            ):
+                ambient_tts = _AmbientSpeechStream(
+                    tts_service,
+                    request,
+                    request_id,
+                    npc_id,
+                )
+            conversation_result = await conversation_service.complete(
+                conversation_request,
+                stream_consumer=ambient_tts.push if ambient_tts else None,
+            )
+            if ambient_tts:
+                await ambient_tts.finish()
+                tts_managed = await ambient_tts.wait_for_playback_start()
+                if ambient_tts.accepted_chunks and not tts_managed:
+                    await ambient_tts.cancel_local_audio()
             result = conversation_result.completion
             provider_name = str(conversation_result.diagnostics.get("provider", "unknown"))
             model_name = str(conversation_result.diagnostics.get("model", result.model))
@@ -194,6 +403,8 @@ async def complete_and_deliver(
             arguments["diagnostics"] = conversation_result.diagnostics
         if semantic_tool_calls:
             arguments["semantic_tool_calls"] = semantic_tool_calls
+        if tts_managed:
+            arguments["tts_managed"] = True
         if not response_text and not semantic_tool_calls:
             failure_reason = "provider_empty_response"
             arguments["error"] = (
@@ -209,6 +420,7 @@ async def complete_and_deliver(
             not failure_reason
             and tts_service
             and tts_service.enabled
+            and not tts_managed
             and not voice_channel_available(state)
         ):
             tts_utterance = _build_tts_utterance(
@@ -239,6 +451,8 @@ async def complete_and_deliver(
             preview(response_text),
         )
     except ProviderError as error:
+        if ambient_tts:
+            await ambient_tts.cancel_local_audio()
         failure_reason = error.code
         arguments = {
             "request_id": request_id,
@@ -260,6 +474,8 @@ async def complete_and_deliver(
             arguments["provider_failure"] = True
             arguments["context_eligible"] = False
     except Exception as error:
+        if ambient_tts:
+            await ambient_tts.cancel_local_audio()
         failure_reason = type(error).__name__
         arguments = {
             "request_id": request_id,
@@ -291,7 +507,20 @@ async def complete_and_deliver(
             ),
             source="project-hoomans.bridge",
         )
-    await client.call(NAMESPACE, "deliverChat", arguments, state.runtime_id or "")
+    try:
+        delivery = await client.call(NAMESPACE, "deliverChat", arguments, state.runtime_id or "")
+    except Exception:
+        if ambient_tts:
+            await ambient_tts.cancel_local_audio()
+        raise
+    if ambient_tts and delivery.get("accepted") is False:
+        LOGGER.info(
+            "ambient response was rejected by Project Hoomans; canceling local TTS "
+            "npc=%s request=%s",
+            npc_id,
+            request_id,
+        )
+        await ambient_tts.cancel_local_audio()
     if tts_utterance and tts_service:
         try:
             accepted = await tts_service.enqueue(
@@ -336,6 +565,18 @@ async def complete_and_deliver(
             provider_name,
             model_name,
         )
+
+
+def _is_ambient_request(request: dict[str, Any]) -> bool:
+    context = request.get("conversation_context") or request.get("context")
+    if not isinstance(context, dict):
+        return False
+    metadata = context.get("metadata")
+    return (
+        isinstance(metadata, dict)
+        and str(metadata.get("mode") or "").strip().casefold()
+        == "ambient_social"
+    )
 
 
 def request_message(request: dict[str, Any]) -> str:

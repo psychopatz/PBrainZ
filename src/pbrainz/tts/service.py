@@ -451,6 +451,7 @@ class TTSService:
         on_started: SpeechCallback | None = None,
         on_finished: SpeechCallback | None = None,
         on_failed: FailureCallback | None = None,
+        wait_for_capacity: bool = False,
     ) -> bool:
         speech_text = normalize_tts_text(utterance.text)
         if not speech_text:
@@ -463,6 +464,7 @@ class TTSService:
             on_started=on_started,
             on_finished=on_finished,
             on_failed=self._record_failure(on_failed),
+            wait_for_capacity=wait_for_capacity,
         )
         if not accepted:
             self.last_error = (
@@ -471,6 +473,11 @@ class TTSService:
                 else "bounded TTS queue is full"
             )
         return accepted
+
+    async def cancel_conversation(self, conversation_id: str) -> int:
+        """Stop local speech that belongs to a no-longer-presented turn."""
+
+        return await self.scheduler.cancel_conversation(str(conversation_id))
 
     async def test_voice(self, slot: str, text: str) -> bool:
         normalized_text = normalize_tts_text(text)
@@ -610,6 +617,15 @@ class TTSService:
             "piper_available": self.provider.available,
             "audio_output_available": self.output.available,
             "audio_backend": self.output.command_name,
+            "streaming_available": bool(
+                getattr(self.provider, "python_available", False)
+                and getattr(self.output, "streaming_available", False)
+            ),
+            "streaming_backend": (
+                f"{self.output.command_name} raw PCM"
+                if getattr(self.output, "streaming_available", False)
+                else None
+            ),
             "audio_devices": self.output.devices(),
             "output_device": self.settings.tts_output_device or "system/default",
             "master_volume": self.settings.tts_master_volume,

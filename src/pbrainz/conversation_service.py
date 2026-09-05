@@ -6,7 +6,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -323,7 +323,12 @@ class ConversationService:
         except Exception as error:  # Diagnostics must never break gameplay.
             LOGGER.warning("LLM trace write failed: %s", error)
 
-    async def complete(self, request: ConversationRequest) -> ConversationResult:
+    async def complete(
+        self,
+        request: ConversationRequest,
+        *,
+        stream_consumer: Callable[[str], Awaitable[None]] | None = None,
+    ) -> ConversationResult:
         if self.debug_trace_enabled():
             self.record_debug_trace(
                 "conversation.input",
@@ -550,7 +555,21 @@ class ConversationService:
             )
         provider_started = time.perf_counter() if self.debug_trace_enabled() else None
         try:
-            result = await self.providers.complete(provider_name, provider_request)
+            if (
+                stream_consumer is not None
+                and not built.tools
+                and callable(getattr(self.providers, "stream_events", None))
+            ):
+                result = await _stream_completion(
+                    self.providers,
+                    provider_name,
+                    provider_request,
+                    stream_consumer,
+                )
+                diagnostics["provider_streaming"] = True
+            else:
+                result = await self.providers.complete(provider_name, provider_request)
+                diagnostics["provider_streaming"] = False
         except Exception as error:
             if self.debug_trace_enabled():
                 self.record_debug_trace(
@@ -1158,6 +1177,59 @@ def _authorized_tool_call_count(
     exposed = {_tool_name(tool) for tool in exposed_tools}
     exposed.discard("")
     return sum(1 for call in tool_calls if _tool_name(call) in exposed)
+
+
+async def _stream_completion(
+    providers: ProviderRegistry,
+    provider_name: str,
+    request: ChatCompletionRequest,
+    consumer: Callable[[str], Awaitable[None]],
+) -> CompletionResult:
+    """Collect a provider stream while forwarding optional presentation deltas.
+
+    Ambient dialogue has no tools, so a provider stream cannot contain an
+    authoritative action that would need to be held back. The complete result
+    is still reconstructed for memory, the game response, and diagnostics;
+    consumer only receives text and is never allowed to abort the LLM turn.
+    """
+
+    stream_events = getattr(providers, "stream_events", None)
+    if not callable(stream_events):
+        raise RuntimeError("provider streaming is unavailable")
+    parts: list[str] = []
+    finish_reason = "stop"
+    usage = None
+    event_count = 0
+    async for event in stream_events(provider_name, request):
+        event_count += 1
+        text = str(getattr(event, "text", "") or "")
+        if text:
+            parts.append(text)
+            try:
+                await consumer(text)
+            except Exception as error:
+                # TTS is an optional presentation sink. A local audio fault
+                # must not turn a valid provider response into a chat failure.
+                LOGGER.warning("ambient streaming presentation skipped: %s", error)
+        event_finish_reason = getattr(event, "finish_reason", None)
+        if event_finish_reason:
+            finish_reason = str(event_finish_reason)
+        event_usage = getattr(event, "usage", None)
+        if event_usage is not None:
+            usage = event_usage
+    LOGGER.info(
+        "NPC provider stream collected provider=%s model=%s events=%s chars=%s",
+        provider_name,
+        request.model,
+        event_count,
+        len("".join(parts)),
+    )
+    return CompletionResult(
+        model=request.model,
+        text="".join(parts),
+        finish_reason=finish_reason,
+        usage=usage,
+    )
 
 
 def _elapsed_ms(start: float | None) -> float | None:

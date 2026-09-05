@@ -3,7 +3,7 @@ import pytest
 from pbrainz.config import Settings
 from pbrainz.conversation_service import ConversationRequest, ConversationService
 from pbrainz.memory import MemoryScope
-from pbrainz.providers.base import CompletionResult
+from pbrainz.providers.base import CompletionResult, StreamEvent
 
 
 class FakeProviders:
@@ -16,6 +16,13 @@ class FakeProviders:
     async def complete(self, provider, request):
         self.requests.append((provider, request))
         return CompletionResult(request.model, "I remember that.")
+
+
+class StreamingProviders(FakeProviders):
+    async def stream_events(self, provider, request):
+        self.requests.append((provider, request))
+        yield StreamEvent(text="First streamed part ")
+        yield StreamEvent(text="and the final part.", finish_reason="stop")
 
 
 class HordeTemplateProviders:
@@ -183,6 +190,35 @@ async def test_structured_conversation_owns_history_and_consolidates(tmp_path) -
     assert any(message.content == "I remember that." for message in messages)
     assert second.diagnostics["consolidated"] is True
     assert second.diagnostics["memory_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_optional_provider_stream_reconstructs_text_and_forwards_deltas(tmp_path) -> None:
+    providers = StreamingProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        context_max_chars=4000,
+    )
+    service = ConversationService(settings, providers)
+    chunks: list[str] = []
+
+    async def consume(chunk: str) -> None:
+        chunks.append(chunk)
+
+    result = await service.complete(
+        ConversationRequest(
+            request_id="stream-request",
+            scope=MemoryScope("world-stream", "player-stream", "npc-stream"),
+            session_id="session-stream",
+            message="What happened?",
+        ),
+        stream_consumer=consume,
+    )
+
+    assert chunks == ["First streamed part ", "and the final part."]
+    assert result.completion.text == "First streamed part and the final part."
+    assert result.diagnostics["provider_streaming"] is True
+    assert len(providers.requests) == 1
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-
 MAX_TTS_TEXT = 12_000
 
 

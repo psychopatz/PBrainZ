@@ -11,7 +11,7 @@ import tempfile
 import time
 import wave
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from ..conversation_runtime import VoiceBinding
 from .catalog import VoiceCatalog
 from .models import (
     SynthesizedAudio,
+    SynthesizedAudioChunk,
     TTSException,
     TTSVoicePreset,
     VoiceModel,
@@ -153,6 +154,90 @@ class PiperProvider:
         finally:
             self.synthesis_latencies_ms.append((time.perf_counter() - started) * 1000)
 
+    def can_stream(self, binding: VoiceBinding | None) -> bool:
+        """Return whether this binding can produce incremental PCM locally."""
+
+        return bool(binding and self.python_available and self.can_synthesize(binding))
+
+    def stream_synthesize(
+        self, text: str, voice_binding: VoiceBinding
+    ) -> Iterable[SynthesizedAudioChunk]:
+        """Yield Piper's sentence-sized PCM chunks without creating a WAV first.
+
+        The CLI implementation remains available for the normal WAV path, but
+        it cannot retain a live voice or expose incremental audio. Streaming is
+        therefore intentionally limited to the Python Piper runtime.
+        """
+
+        if not self.python_available:
+            raise TTSException("streaming Piper requires the Python Piper runtime")
+        preset = self._preset_for_binding(voice_binding)
+        if not preset:
+            raise TTSException(f"no installed Piper voice is available for {voice_binding.slot}")
+        model = self.catalog.get(preset.voice_model_id)
+        if not model or not model.installed:
+            raise TTSException(f"Piper model is not installed: {preset.voice_model_id}")
+        voice_type = self._piper_voice_type
+        voice = self.cache.get_or_load(
+            model.id,
+            lambda: voice_type.load(model.model_path),
+        )
+        started = time.perf_counter()
+        chunk_count = 0
+        try:
+            synthesis_config = self._synthesis_config(preset)
+            try:
+                chunks = voice.synthesize(text, syn_config=synthesis_config)
+            except TypeError:
+                chunks = voice.synthesize(text)
+            for chunk in chunks:
+                pcm = bytes(chunk.audio_int16_bytes)
+                if not pcm:
+                    continue
+                sample_rate = int(chunk.sample_rate)
+                sample_width = int(chunk.sample_width)
+                sample_channels = int(chunk.sample_channels)
+                duration_ms = max(
+                    1,
+                    round(
+                        len(pcm)
+                        / (sample_rate * sample_width * sample_channels)
+                        * 1000
+                    ),
+                )
+                chunk_count += 1
+                yield SynthesizedAudioChunk(
+                    sample_rate=sample_rate,
+                    sample_width=sample_width,
+                    sample_channels=sample_channels,
+                    pcm=pcm,
+                    duration_ms=duration_ms,
+                )
+        except Exception as error:
+            if isinstance(error, TTSException):
+                raise
+            raise TTSException(str(error)) from error
+        finally:
+            latency_ms = (time.perf_counter() - started) * 1000
+            self.synthesis_latencies_ms.append(latency_ms)
+            LOGGER.debug(
+                "Piper streaming synthesis model=%s chunks=%s latency_ms=%s pitch=%s",
+                model.id,
+                chunk_count,
+                round(latency_ms),
+                voice_binding.pitch,
+            )
+
+    @staticmethod
+    def _synthesis_config(preset: TTSVoicePreset) -> Any:
+        """Build the current Piper config while tolerating older runtimes."""
+
+        try:
+            from piper.config import SynthesisConfig
+        except ImportError:
+            return None
+        return SynthesisConfig(speaker_id=preset.optional_speaker_id)
+
     def _synthesize_python(
         self,
         text: str,
@@ -167,11 +252,12 @@ class PiperProvider:
             lambda: voice_type.load(model.model_path),
         )
         with wave.open(str(output_path), "wb") as output:
-            kwargs: dict[str, Any] = {}
-            if preset.optional_speaker_id is not None:
-                kwargs["speaker_id"] = preset.optional_speaker_id
             try:
-                voice.synthesize_wav(text, output, **kwargs)
+                voice.synthesize_wav(
+                    text,
+                    output,
+                    syn_config=self._synthesis_config(preset),
+                )
             except TypeError:
                 voice.synthesize_wav(text, output)
 
@@ -248,7 +334,9 @@ class AudioOutput:
 
     @property
     def command_name(self) -> str | None:
-        for name in ("ffplay", "pw-play", "paplay", "aplay", "afplay"):
+        # PipeWire is the native Linux playback path. Prefer it over spawning
+        # one ffplay process per line; it accepts raw PCM without a WAV file.
+        for name in ("pw-play", "ffplay", "paplay", "aplay", "afplay"):
             if shutil.which(name):
                 return name
         return None
@@ -256,6 +344,12 @@ class AudioOutput:
     @property
     def available(self) -> bool:
         return self.command_name is not None
+
+    @property
+    def streaming_available(self) -> bool:
+        """Return whether a local player accepts a continuous raw PCM pipe."""
+
+        return self.command_name in {"pw-play", "ffplay"}
 
     def devices(self) -> list[str]:
         """Return best-effort local sink names for the native settings tab."""
@@ -334,6 +428,74 @@ class AudioOutput:
             )
         except (OSError, ValueError) as error:
             raise TTSException(f"audio output failed: {error}") from error
+
+    def stream_command(
+        self, sample_rate: int, sample_width: int, sample_channels: int
+    ) -> list[str]:
+        """Build the low-latency Linux command for Piper PCM chunks."""
+
+        if not self.streaming_available:
+            raise TTSException("PipeWire or ffplay is required for streaming audio output")
+        if sample_width not in {1, 2, 4}:
+            raise TTSException(f"unsupported streaming sample width: {sample_width}")
+        sample_format = {1: "u8", 2: "s16", 4: "s32"}[sample_width]
+        volume = max(0.0, min(1.0, float(self.settings.tts_master_volume)))
+        name = self.command_name
+        if name == "pw-play":
+            device = self.settings.tts_output_device.strip()
+            if device.casefold() == "system/default":
+                device = ""
+            return [
+                "pw-play",
+                *(["--target", device] if device else []),
+                "--rate",
+                str(sample_rate),
+                "--channels",
+                str(sample_channels),
+                "--format",
+                sample_format,
+                "--volume",
+                str(volume),
+                "-",
+            ]
+        return [
+            "ffplay",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "quiet",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-f",
+            {1: "u8", 2: "s16le", 4: "s32le"}[sample_width],
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(sample_channels),
+            "-volume",
+            str(round(volume * 100)),
+            "-i",
+            "-",
+        ]
+
+    async def start_stream(
+        self, sample_rate: int, sample_width: int, sample_channels: int
+    ) -> asyncio.subprocess.Process:
+        """Start one persistent local player for a streaming utterance."""
+
+        try:
+            return await asyncio.create_subprocess_exec(
+                *self.stream_command(sample_rate, sample_width, sample_channels),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                # Keep the short Linux backend diagnostic available to the
+                # scheduler if PipeWire/FFmpeg exits before consuming audio.
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (OSError, ValueError) as error:
+            raise TTSException(f"streaming audio output failed: {error}") from error
 
 
 def _wav_duration_ms(path: Path, text: str) -> int:

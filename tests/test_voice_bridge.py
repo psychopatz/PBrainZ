@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from pbrainz.bridge import BridgeState
-from pbrainz.bridge.handler import complete_and_deliver
+from pbrainz.bridge.handler import _AmbientSpeechStream, complete_and_deliver
 from pbrainz.bridge.voice import (
     VOICE_CHANNEL,
     VOICE_NAMESPACE,
@@ -28,7 +28,15 @@ class FakeTTS:
     def can_synthesize(self, binding) -> bool:
         return isinstance(binding, VoiceBinding)
 
-    async def enqueue(self, utterance, *, on_started=None, on_finished=None, on_failed=None):
+    async def enqueue(
+        self,
+        utterance,
+        *,
+        on_started=None,
+        on_finished=None,
+        on_failed=None,
+        wait_for_capacity=False,
+    ):
         self.enqueued.append(utterance)
         if on_started:
             await on_started(utterance)
@@ -40,7 +48,15 @@ class DelayedTTS(FakeTTS):
         super().__init__()
         self.rejects = 1
 
-    async def enqueue(self, utterance, *, on_started=None, on_finished=None, on_failed=None):
+    async def enqueue(
+        self,
+        utterance,
+        *,
+        on_started=None,
+        on_finished=None,
+        on_failed=None,
+        wait_for_capacity=False,
+    ):
         if self.rejects:
             self.rejects -= 1
             return False
@@ -69,6 +85,51 @@ class TextProvider:
         from pbrainz.providers.base import CompletionResult
 
         return CompletionResult(request.model, "A shared voice response.")
+
+
+class AmbientStreamingProvider:
+    def resolve(self, _provider, model):
+        return "custom", model if model != "default" else "fake-model"
+
+    async def stream_events(self, _provider, _request):
+        from pbrainz.providers.base import StreamEvent
+
+        yield StreamEvent(text="Stay close and watch the road ahead with me")
+        yield StreamEvent(text=".")
+
+
+class AmbientStreamingTTS(FakeTTS):
+    last_error = None
+
+
+@pytest.mark.asyncio
+async def test_ambient_speech_stream_queues_before_provider_finishes() -> None:
+    tts = AmbientStreamingTTS()
+    request = {
+        "conversation_context": {
+            "session_id": "ambient-session",
+            "voice_binding": {
+                "npc_uuid": "npc-one",
+                "slot": "VoiceFemale:2",
+            },
+        }
+    }
+    stream = _AmbientSpeechStream(tts, request, "ambient-request", "npc-one")
+
+    await stream.push("Stay close and watch the road ahead")
+
+    assert stream.started is False
+    assert len(tts.enqueued) == 0
+
+    await stream.push(" with me")
+    assert stream.started is False
+    assert len(tts.enqueued) == 0
+
+    await stream.push(".")
+    await stream.finish()
+    assert stream.started is True
+    assert len(tts.enqueued) == 1
+    assert tts.enqueued[0].text == "Stay close and watch the road ahead with me."
 
 
 def ready_state() -> BridgeState:
@@ -204,3 +265,50 @@ async def test_llm_handler_uses_generic_channel_without_legacy_tts_duplicate(tmp
     assert len(tts.enqueued) == 0
     assert client.calls[0][1] == "deliverChat"
     assert "presentation_mode" not in client.calls[0][2]
+
+
+@pytest.mark.asyncio
+async def test_ambient_llm_streams_local_tts_and_marks_final_message_managed(tmp_path) -> None:
+    from pbrainz.config import Settings
+    from pbrainz.conversation_service import ConversationService
+
+    providers = AmbientStreamingProvider()
+    tts = AmbientStreamingTTS()
+    service = ConversationService(
+        Settings(
+            database_path=str(tmp_path / "settings.db"),
+            bridge_required=False,
+        ),
+        providers,
+    )
+    client = LifecycleClient()
+    request = {
+        "request_id": "ambient-stream-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "ambient-session",
+            "message": "The player killed a zombie.",
+            "metadata": {"mode": "ambient_social"},
+            "voice_binding": {
+                "npc_uuid": "npc-one",
+                "slot": "VoiceFemale:2",
+            },
+        },
+    }
+
+    await complete_and_deliver(
+        providers,
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+        tts_service=tts,
+    )
+
+    assert len(tts.enqueued) == 1
+    delivery = next(call[2] for call in client.calls if call[1] == "deliverChat")
+    assert delivery["response_text"] == "Stay close and watch the road ahead with me."
+    assert delivery["tts_managed"] is True

@@ -74,7 +74,7 @@ download the model and adjacent `.onnx.json` config directly with checksum
 verification. Installed files are placed under the configured model root.
 The `piper-tts` runtime is included in source installs and release bundles, so
 an installed voice can be synthesized locally when an OS audio player such as
-`ffplay` is available.
+Linux PipeWire's `pw-play` or FFmpeg's `ffplay` is available.
 Press `Refresh catalog` to update the remote list. Select a voice and use
 `Test selected voice` to play Piper's pre-generated sample without installing
 the model; `Install selected voice` downloads it for local synthesis with a
@@ -105,10 +105,16 @@ group to show all installed genders. Each option includes its gender label,
 such as `female`, `male`, `mixed`, or `unknown`.
 TTS performance tuning is available in the main `Settings` tab; the TTS tab is
 kept focused on voice installation, presets, and playback controls.
-When enabled, PBrainZ plays the local WAV output and sends only compact
-speech lifecycle events so the game can synchronize its existing subtitles.
-Missing Piper, models, or audio output automatically falls back to text-only
-conversation.
+When enabled, PBrainZ normally streams ordered sentence-sized PCM chunks from
+the Python Piper runtime into a local PipeWire (`pw-play`) or `ffplay` process,
+allowing longer responses to begin playback before the entire response has
+been synthesized. Ambient response chunks apply backpressure and stale
+responses are canceled, so accepted text is not silently discarded. If Python
+Piper or a streaming player is unavailable, it falls back to the bounded
+full-WAV path;
+missing Piper, models, or audio output still automatically falls back to
+text-only conversation. Only compact speech lifecycle events cross the bridge;
+audio remains local to the client.
 
 `tkinter` is included with standard Windows Python installations. On Linux,
 install the distribution's Tk package if it is missing (for example,

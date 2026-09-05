@@ -13,6 +13,7 @@ from pbrainz.tts import (
     PiperModelCache,
     SpeechScheduler,
     SynthesizedAudio,
+    SynthesizedAudioChunk,
     TTSException,
     TTSService,
     TTSVoicePreset,
@@ -623,6 +624,134 @@ class _FakeOutput:
         process = _FakeProcess()
         self.processes.append(process)
         return process
+
+
+class _FakePipe:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, value: bytes) -> None:
+        self.writes.append(value)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+class _FakeStreamProcess(_FakeProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdin = _FakePipe()
+
+
+class _FakeStreamingProvider(_FakeProvider):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.stream_calls: list[str] = []
+
+    def can_stream(self, _binding) -> bool:
+        return True
+
+    def stream_synthesize(self, text: str, _binding):
+        self.stream_calls.append(text)
+        yield SynthesizedAudioChunk(22050, 2, 1, b"first", 40)
+        yield SynthesizedAudioChunk(22050, 2, 1, b"second", 50)
+
+
+class _FakeStreamingOutput(_FakeOutput):
+    streaming_available = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.streams: list[_FakeStreamProcess] = []
+
+    async def start_stream(self, _rate: int, _width: int, _channels: int) -> _FakeStreamProcess:
+        process = _FakeStreamProcess()
+        self.streams.append(process)
+        return process
+
+
+@pytest.mark.asyncio
+async def test_scheduler_starts_streaming_audio_before_process_finishes(tmp_path) -> None:
+    settings = _settings(tmp_path, tts_natural_gap_ms=0, tts_audio_buffer_ms=1)
+    provider = _FakeStreamingProvider(tmp_path)
+    output = _FakeStreamingOutput()
+    scheduler = SpeechScheduler(provider, output, settings)
+    started: list[str] = []
+
+    async def on_started(utterance: Utterance) -> None:
+        started.append(utterance.utterance_id)
+
+    utterance = Utterance(
+        "stream-line",
+        "stream-conversation",
+        0,
+        "npc-stream",
+        "first sentence. second sentence.",
+        voice_binding=VoiceBinding("npc-stream", "VoiceFemale:0"),
+    )
+    await scheduler.start()
+    try:
+        assert await scheduler.enqueue(utterance, on_started=on_started)
+        await asyncio.wait_for(_wait_until(lambda: started == ["stream-line"]), timeout=2)
+        assert provider.stream_calls == [utterance.text]
+        assert len(output.streams) == 1
+        assert output.streams[0].stdin.writes[0] == b"first"
+        output.streams[0].release()
+        await asyncio.wait_for(_wait_until(lambda: output.streams[0].stdin.closed), timeout=2)
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_keeps_queued_streaming_lines_in_streaming_order(tmp_path) -> None:
+    settings = _settings(tmp_path, tts_natural_gap_ms=0, tts_audio_buffer_ms=1)
+    provider = _FakeStreamingProvider(tmp_path)
+    output = _FakeStreamingOutput()
+    scheduler = SpeechScheduler(provider, output, settings)
+    started: list[str] = []
+
+    async def on_started(utterance: Utterance) -> None:
+        started.append(utterance.utterance_id)
+
+    first = Utterance(
+        "stream-line-one",
+        "stream-conversation",
+        0,
+        "npc-stream",
+        "first line.",
+        voice_binding=VoiceBinding("npc-stream", "VoiceFemale:0"),
+    )
+    second = Utterance(
+        "stream-line-two",
+        "stream-conversation",
+        1,
+        "npc-stream",
+        "second line.",
+        voice_binding=VoiceBinding("npc-stream", "VoiceFemale:0"),
+    )
+    await scheduler.start()
+    try:
+        assert await scheduler.enqueue(first, on_started=on_started)
+        assert await scheduler.enqueue(second, on_started=on_started)
+        await asyncio.wait_for(_wait_until(lambda: started == [first.utterance_id]), timeout=2)
+        assert len(output.streams) == 1
+
+        output.streams[0].release()
+        await asyncio.wait_for(
+            _wait_until(lambda: started == [first.utterance_id, second.utterance_id]),
+            timeout=2,
+        )
+        assert len(output.streams) == 2
+        output.streams[1].release()
+    finally:
+        await scheduler.stop()
 
 
 @pytest.mark.asyncio

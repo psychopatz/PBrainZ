@@ -229,6 +229,25 @@ class TTSVoicePreset:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SynthesizedAudioChunk:
+    """One bounded PCM chunk produced by a streaming TTS backend."""
+
+    sample_rate: int
+    sample_width: int
+    sample_channels: int
+    pcm: bytes
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        if self.sample_rate <= 0 or self.sample_width <= 0 or self.sample_channels <= 0:
+            raise ValueError("audio chunk format is invalid")
+        if not self.pcm:
+            raise ValueError("audio chunk is empty")
+        if self.duration_ms <= 0:
+            raise ValueError("audio chunk duration is invalid")
+
+
 class VoicePresetRepository:
     """Local-only slot mapping; no Piper IDs enter bridge payloads."""
 
@@ -343,4 +362,3 @@ def _safe_int(value: object) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
-
