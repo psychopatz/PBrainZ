@@ -183,35 +183,23 @@ def _prepare_build_version(
 
 
 def _prepare_icon_assets(staging: Path) -> Path:
-    """Render all PNG variants from the canonical SVG before freezing the app."""
+    """Copy the checked-in raster variants before freezing the app.
+
+    The release runners do not share native graphics libraries. In particular,
+    CairoSVG needs a separately installed Cairo runtime on Windows, while the
+    repository already contains the canonical PNG variants used by the GUI.
+    Reusing those files keeps release builds deterministic and platform-neutral.
+    """
 
     icon_assets = staging / "icon-assets"
+    icon_assets.mkdir(parents=True, exist_ok=True)
     source = PACKAGING_ROOT / "pbrainz.svg"
-    _run(
-        [
-            sys.executable,
-            str(PROJECT_ROOT / "scripts" / "render_icon.py"),
-            "--source",
-            str(source),
-            "--output",
-            str(icon_assets / "pbrainz.png"),
-            "--size",
-            "256",
-        ]
-    )
-    _run(
-        [
-            sys.executable,
-            str(PROJECT_ROOT / "scripts" / "render_icon.py"),
-            "--source",
-            str(source),
-            "--output",
-            str(icon_assets / "pbrainz-mark.png"),
-            "--size",
-            "512",
-            "--transparent",
-        ]
-    )
+    gui_assets = PROJECT_ROOT / "src" / "pbrainz" / "gui" / "assets"
+    for filename in ("pbrainz.png", "pbrainz-mark.png"):
+        asset = gui_assets / filename
+        if not asset.is_file():
+            raise SystemExit(f"Expected checked-in icon asset was not found: {asset}")
+        shutil.copy2(asset, icon_assets / filename)
     shutil.copy2(source, icon_assets / "pbrainz.svg")
     return icon_assets
 
