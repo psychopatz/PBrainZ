@@ -52,6 +52,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
+      - name: Remove superseded v0.1.12 release
+        if: github.ref_name == 'v0.1.13'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.1.12 --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete v0.1.12 --cleanup-tag --yes --repo "${GITHUB_REPOSITORY}"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: |

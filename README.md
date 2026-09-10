@@ -126,7 +126,9 @@ catalogs, recent activity, TTS models, and memory. The source launchers and
 the AppImage use the directory in which they are installed; this keeps each
 copy self-contained and movable. Set `PBRAINZ_DB` to override the database
 location. The database is created fresh for each portable copy, is local-only,
-and should be kept private.
+and should be kept private. Never include `data/` in a release archive or
+upload it with the executable; it is runtime state and may contain provider
+credentials.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
 startup. By default startup does not make network requests; the panel's
@@ -168,6 +170,10 @@ The Windows build produces a single `.exe`. The Linux build produces an
 AppImage and downloads the official `appimagetool` automatically when needed.
 Pushing a `v*` tag runs both builds through
 `.github/workflows/release.yml` and attaches the artifacts to a GitHub Release.
+The frozen GUI artifacts are windowed applications: Windows does not open a
+companion command prompt, and the Windows executable uses the checked-in
+PBrainZ icon resource. The release builder refuses to use an output directory
+that already contains private runtime data.
 The Windows `.exe` is not produced on Linux; run the Windows command on a
 Windows machine or dispatch the GitHub Actions workflow. Local Linux builds
 are written to `dist/release/PBrainZ-<version>-x86_64.AppImage`, while the
@@ -218,10 +224,11 @@ server:
 ```
 
 `--activity` shows the newest 50 entries by default and accepts up to 500.
-The same flags work with the frozen Windows executable or AppImage. Release
-builds keep a terminal attached so bridge state, NPC task messages, provider
-responses, and delivery errors are also visible while the GUI/server runs.
-Message previews are bounded and API keys are never logged.
+The same flags are accepted by the frozen Windows executable or AppImage, but
+those GUI artifacts are intentionally windowed and do not open a terminal for
+their output. Use the native activity panel or the source launcher when you
+need terminal output. Message previews are bounded and API keys are never
+logged.
 
 The OpenAI, Ollama, LM Studio, Custom, and AI Horde profiles use the OpenAI Chat
 Completions protocol. Ollama and LM Studio normally need no API key. The Horde

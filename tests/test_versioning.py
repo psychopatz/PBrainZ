@@ -61,3 +61,44 @@ def test_invalid_version_is_rejected() -> None:
 def test_version_source_is_inside_the_package() -> None:
     assert Path(build_release.VERSION_FILE).name == "version.py"
     assert Path(build_release.VERSION_FILE).exists()
+
+
+def test_release_icon_assets_include_native_windows_icon(tmp_path) -> None:
+    assets = build_release._prepare_icon_assets(tmp_path)
+
+    assert (assets / "pbrainz.ico").is_file()
+    assert (assets / "pbrainz.png").is_file()
+    assert (assets / "pbrainz-mark.png").is_file()
+    assert (assets / "pbrainz.svg").is_file()
+
+
+def test_windows_pyinstaller_build_is_windowed_and_uses_pbrainz_icon(tmp_path, monkeypatch) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    icon_assets = build_release._prepare_icon_assets(staging)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> None:
+        commands.append(command)
+        if len(commands) == 2:
+            executable = staging / "pyinstaller-dist" / "PBrainZ.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"test executable")
+
+    monkeypatch.setattr(build_release, "_run", fake_run)
+
+    executable = build_release._build_pyinstaller("exe", staging, icon_assets)
+
+    assert executable.name == "PBrainZ.exe"
+    pyinstaller_command = commands[1]
+    assert "--windowed" in pyinstaller_command
+    assert "--console" not in pyinstaller_command
+    icon_index = pyinstaller_command.index("--icon")
+    assert pyinstaller_command[icon_index + 1] == str(icon_assets / "pbrainz.ico")
+
+
+def test_release_builder_rejects_private_runtime_data(tmp_path) -> None:
+    (tmp_path / "data").mkdir()
+
+    with pytest.raises(SystemExit, match="private runtime data"):
+        build_release._ensure_release_output_is_safe(tmp_path)

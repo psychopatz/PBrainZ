@@ -43,7 +43,7 @@ def main() -> int:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "data").mkdir(exist_ok=True)
+    _ensure_release_output_is_safe(output_dir)
     version, previous_version = _prepare_build_version(args.version, args.bump)
 
     try:
@@ -80,7 +80,10 @@ def _parse_args() -> argparse.Namespace:
         "--bump",
         choices=("patch", "minor", "major", "none"),
         default="patch",
-        help="Automatic version bump for local builds; default: patch. Use none to rebuild unchanged.",
+        help=(
+            "Automatic version bump for local builds; default: patch. "
+            "Use none to rebuild unchanged."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -194,12 +197,16 @@ def _prepare_icon_assets(staging: Path) -> Path:
     icon_assets = staging / "icon-assets"
     icon_assets.mkdir(parents=True, exist_ok=True)
     source = PACKAGING_ROOT / "pbrainz.svg"
+    windows_icon = PACKAGING_ROOT / "pbrainz.ico"
     gui_assets = PROJECT_ROOT / "src" / "pbrainz" / "gui" / "assets"
     for filename in ("pbrainz.png", "pbrainz-mark.png"):
         asset = gui_assets / filename
         if not asset.is_file():
             raise SystemExit(f"Expected checked-in icon asset was not found: {asset}")
         shutil.copy2(asset, icon_assets / filename)
+    if not windows_icon.is_file():
+        raise SystemExit(f"Expected checked-in Windows icon asset was not found: {windows_icon}")
+    shutil.copy2(windows_icon, icon_assets / windows_icon.name)
     shutil.copy2(source, icon_assets / "pbrainz.svg")
     return icon_assets
 
@@ -215,10 +222,10 @@ def _build_pyinstaller(target: str, staging: Path, icon_assets: Path) -> Path:
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        # Keep stdout/stderr available so ``PBrainZ --activity`` and the
-        # bridge send/receive diagnostics work from a terminal in a frozen
-        # release build. The GUI still launches normally from the desktop.
-        "--console",
+        # Release artifacts are GUI applications. In particular, the Windows
+        # build must use the windowed subsystem so launching it from Explorer
+        # does not create a second command prompt window.
+        "--windowed",
         "--name",
         PRODUCT_BINARY_NAME,
         "--paths",
@@ -250,6 +257,8 @@ def _build_pyinstaller(target: str, staging: Path, icon_assets: Path) -> Path:
         "--collect-data",
         "piper",
     ]
+    if target == "exe":
+        command.extend(["--icon", str(icon_assets / "pbrainz.ico")])
     command.append("--onefile" if target == "exe" else "--onedir")
     command.append(str(PACKAGING_ROOT / "launcher.py"))
     _run(command)
@@ -260,6 +269,23 @@ def _build_pyinstaller(target: str, staging: Path, icon_assets: Path) -> Path:
     if not executable.exists():
         raise SystemExit(f"PyInstaller completed but expected output was not found: {executable}")
     return executable
+
+
+def _ensure_release_output_is_safe(output_dir: Path) -> None:
+    """Reject output folders that already contain private runtime data.
+
+    PBrainZ creates ``data/`` beside a portable executable at first launch.
+    That directory contains credentials and conversation history, so a release
+    build must never reuse an output folder that already has it. The data is
+    intentionally not created by this build script.
+    """
+    runtime_data = output_dir / "data"
+    if runtime_data.exists():
+        raise SystemExit(
+            "Refusing to build a release beside private runtime data: "
+            f"{runtime_data}. Choose a clean --output-dir or move that data "
+            "directory before packaging."
+        )
 
 
 def _build_appimage(
