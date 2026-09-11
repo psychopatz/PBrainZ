@@ -240,9 +240,31 @@ async def test_first_meeting_memory_is_added_to_rag_context(tmp_path) -> None:
 
     assert result.diagnostics["retrieval_needed"] is True
     assert result.retrieved_memories
-    assert "The player first met Alice on July 9, 1993" in (
-        providers.requests[0][1].messages[0].content or ""
+    prompt = "\n".join(message.content or "" for message in providers.requests[0][1].messages)
+    assert "The player first met Alice on July 9, 1993" in prompt
+
+
+@pytest.mark.asyncio
+async def test_conversation_uses_bounded_default_dialogue_budget(tmp_path) -> None:
+    providers = FakeProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
     )
+    service = ConversationService(settings, providers)
+
+    await service.complete(
+        _conversation_request(
+            "bounded-output",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "Hello there.",
+        )
+    )
+
+    assert providers.requests[0][1].max_tokens == 128
 
 
 @pytest.mark.asyncio
@@ -715,7 +737,7 @@ async def test_conversation_recall_finds_dated_turns_from_a_previous_session(tmp
         )
     )
 
-    system = providers.requests[0][1].messages[0].content
+    system = "\n".join(message.content or "" for message in providers.requests[0][1].messages)
     assert result.diagnostics["recalled_turn_count"] == 1
     assert "Relevant Conversation Recall" in system
     assert "game day 12" in system
@@ -778,6 +800,6 @@ async def test_conversation_builds_dated_layers_and_skips_rag_for_greeting(tmp_p
     assert store.get_day_synopsis(scope, 6) is not None
     assert store.stats()["episode_count"] == 1
     assert store.stats()["fact_count"] >= 1
-    system = providers.requests[-1][1].messages[0].content
+    system = "\n".join(message.content or "" for message in providers.requests[-1][1].messages)
     assert "Conversation Scene" in system
     assert "Today So Far" in system

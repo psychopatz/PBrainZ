@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pbrainz.retrieval_dictionary import DEFAULT_STOP_WORDS
+from pbrainz.semantic_tool_protocol import infer_social_intent, is_name_question
 
 _TOKEN_RE = re.compile(r"[\w-]{2,64}", re.UNICODE)
 _SAFE_TOOL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -79,9 +80,21 @@ class ToolRouter:
         cards = tuple(self._card(tool) for tool in tools if isinstance(tool, dict))
         eligible = tuple(card for card in cards if card.eligible)
         query_tokens = self._tokens(" ".join((query, current_topic or "")))
+        name_question = is_name_question(query)
+        social_intent = infer_social_intent(query) is not None
         scored = sorted(
             (
-                (self._score(card, query_tokens, index), index, card)
+                (
+                    self._score(
+                        card,
+                        query_tokens,
+                        index,
+                        name_question=name_question,
+                        social_intent=social_intent,
+                    ),
+                    index,
+                    card,
+                )
                 for index, card in enumerate(eligible)
             ),
             key=lambda value: (-value[0], value[1]),
@@ -168,7 +181,24 @@ class ToolRouter:
                         tokens.add(expanded_token)
         return tokens
 
-    def _score(self, card: ToolCard, query_tokens: set[str], index: int) -> float:
+    def _score(
+        self,
+        card: ToolCard,
+        query_tokens: set[str],
+        index: int,
+        *,
+        name_question: bool,
+        social_intent: bool,
+    ) -> float:
+        # Identity and social actions have canonical classifiers downstream.
+        # Do not let generic description words such as "you" expose ask_name
+        # for unrelated small talk, or expose social_react merely because a
+        # description mentions the player.  The fallback path still preserves
+        # the standalone router's safe social behavior when explicitly asked.
+        if card.name == "ask_name":
+            return 100.0 if name_question else 0.0
+        if card.name == "social_react":
+            return 100.0 if social_intent else 0.0
         searchable = self._tokens(" ".join((card.name, card.description, *card.tags)))
         overlap = query_tokens.intersection(searchable)
         score = float(len(overlap))

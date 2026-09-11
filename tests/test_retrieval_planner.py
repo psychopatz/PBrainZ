@@ -43,7 +43,8 @@ def test_context_does_not_send_unrelated_tool_schemas_or_duplicate_descriptions(
     )
 
     assert result.tools == []
-    assert "Request the companion follow" not in (result.messages[0].content or "")
+    prompt = "\n".join(message.content or "" for message in result.messages)
+    assert "Request the companion follow" not in prompt
 
 
 def test_context_sends_relevant_tool_schema_with_only_compact_name_in_prompt() -> None:
@@ -60,6 +61,6 @@ def test_context_sends_relevant_tool_schema_with_only_compact_name_in_prompt() -
     )
 
     assert [tool["function"]["name"] for tool in result.tools] == ["order_follow"]
-    prompt = result.messages[0].content or ""
+    prompt = "\n".join(message.content or "" for message in result.messages)
     assert "- order_follow" in prompt
     assert "Request the companion follow" not in prompt

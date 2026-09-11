@@ -1,3 +1,5 @@
+import pytest
+
 from pbrainz.tool_routing import ToolRouter
 
 
@@ -57,3 +59,37 @@ def test_tool_router_selects_identity_tool_for_name_question() -> None:
     )
 
     assert [tool["function"]["name"] for tool in selection.selected] == ["ask_name"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "What are you doing?",
+        "How are you doing?",
+        "Where do you live exactly?",
+        "I love you btw.",
+        "You are useless.",
+        "Do you remember when we met?",
+    ),
+)
+def test_tool_router_does_not_expose_identity_for_generic_or_social_messages(
+    message: str,
+) -> None:
+    selection = ToolRouter(max_results=4).select(
+        (
+            _tool("social_react", "Register a clear social reaction."),
+            _tool(
+                "ask_name",
+                "Ask the NPC to say their name through authoritative identity disclosure.",
+            ),
+        ),
+        message,
+        fallback_safe=False,
+    )
+
+    names = [tool["function"]["name"] for tool in selection.selected]
+    assert "ask_name" not in names
+    if message == "I love you btw.":
+        assert names == ["social_react"]
+    else:
+        assert names == []

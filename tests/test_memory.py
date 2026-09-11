@@ -138,13 +138,71 @@ def test_context_builder_puts_compact_horde_output_contract_first() -> None:
         )
     )
     system = result.messages[0].content or ""
-    assert "Output only 1-2 short" in system
-    assert "Instruction:" in system
-    assert "Response" in system
-    assert "Self-Correction:" in system
-    assert "Final Check:" in system
-    assert "New attempt:" in system
-    assert "reply in character" in system
+    assert "Output only 1-2 natural" in system
+    assert "Game context is authoritative facts" in system
+    assert "Final Check:" not in system
+    assert "Self-Correction:" not in system
+
+
+def test_context_builder_projects_live_state_and_keeps_internal_metadata_out() -> None:
+    result = ContextBuilder().build(
+        ContextInput(
+            npc_name="Hassan patz",
+            player_name="Psycho",
+            character_card={
+                "archetype": "General Survivor",
+                "archetype_id": "General",
+                "personality": {
+                    "aggression": 0.6,
+                    "compassion": 0.67,
+                    "generatedFromSeed": True,
+                    "schemaVersion": 1,
+                    "foodPreference": "spicy",
+                },
+                "skills": {
+                    "LongBlade": 5,
+                    "Maintenance": 4,
+                    "Cooking": 1,
+                },
+            },
+            relationship_snapshot={
+                "state": "friend",
+                "approval": 78.8,
+                "respect": 81.1,
+                "familiarity": 100,
+                "identityDiagnostics": {"revision": 28},
+            },
+            relationship_capabilities={
+                "available_reactions": ["praise", "comfort"],
+                "positive_action_cooldown_remaining_hours": 0,
+                "revision": 28,
+                "server_authoritative": True,
+            },
+            current_state={
+                "activeBehavior": "FollowOwner:moving",
+                "needs": {
+                    "hunger": 0.8,
+                    "hunger_level": "CRITICAL",
+                    "revision": 2,
+                    "sampled_at": 45.2,
+                },
+                "weaponStatus": "melee_ready",
+            },
+            current_message="How are you holding up?",
+        )
+    )
+    system = result.messages[0].content or ""
+    rendered = "\n".join(message.content or "" for message in result.messages)
+    assert "interactionJournal" not in rendered
+    assert "identityDiagnostics" not in rendered
+    assert "generatedFromSeed" not in rendered
+    assert "schemaVersion" not in rendered
+    assert "revision=28" not in rendered
+    assert "approval: high" in rendered
+    assert "familiarity: very close" in rendered
+    assert "hunger=critical" in rendered
+    assert "weaponStatus" not in system
+    assert result.diagnostics["dynamic_context_chars"] > 0
 
 
 def test_hearsay_memory_keeps_claim_provenance_without_making_a_fact(tmp_path) -> None:

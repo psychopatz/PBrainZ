@@ -95,6 +95,7 @@ DEFAULT_STOP_WORDS = (
     "where",
     "with",
     "would",
+    "you",
     "your",
 )
 DEFAULT_TOKEN_EXPANSIONS = {

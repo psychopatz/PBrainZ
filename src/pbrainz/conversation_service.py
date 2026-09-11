@@ -50,6 +50,7 @@ from pbrainz.template_profiles import (
 
 LOGGER = logging.getLogger(__name__)
 TraceWriter = Callable[..., None]
+DEFAULT_DIALOGUE_MAX_TOKENS = 128
 
 
 def retrieval_needed_for(message: str) -> bool:
@@ -582,7 +583,11 @@ class ConversationService:
             provider=provider_name,
             messages=built.messages,
             temperature=request.temperature,
-            max_tokens=request.max_tokens,
+            max_tokens=(
+                request.max_tokens
+                if request.max_tokens is not None
+                else DEFAULT_DIALOGUE_MAX_TOKENS
+            ),
             tools=built.tools or None,
             stop=list(template_profile.stop_sequences) or None,
             metadata={
