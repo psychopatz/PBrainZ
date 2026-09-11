@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from pbrainz.database import application_root, legacy_database_candidates
+from pbrainz.database import application_root
 from pbrainz.game_bridge_settings import GameBridgeSettings
 from pbrainz.paths import bridge_root_for, default_zomboid_path
 
@@ -74,9 +74,3 @@ def test_application_root_uses_frozen_executable_location(tmp_path, monkeypatch)
     monkeypatch.setattr(sys, "executable", str(executable))
 
     assert application_root() == executable.parent
-
-
-def test_legacy_candidates_include_database_beside_portable_data(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("PBRAINZ_PORTABLE_ROOT", str(tmp_path))
-
-    assert tmp_path / "data" / "hoomansllm.db" in legacy_database_candidates()

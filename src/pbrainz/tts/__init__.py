@@ -2,6 +2,7 @@
 
 from .audio import AudioOutput, PiperModelCache, PiperProvider
 from .catalog import VoiceCatalog
+from .effects import AudioEffectProcessor, AudioEffectStream
 from .models import (
     DEFAULT_TTS_PRESETS,
     MAX_CATALOG_MODELS,
@@ -30,6 +31,8 @@ from .text import MAX_TTS_TEXT, NONVERBAL_CUE_RULES, NonverbalCueRule, normalize
 
 __all__ = [
     "AudioOutput",
+    "AudioEffectProcessor",
+    "AudioEffectStream",
     "DownloadProgressCallback",
     "DEFAULT_TTS_PRESETS",
     "FailureCallback",

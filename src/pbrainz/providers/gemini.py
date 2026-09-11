@@ -22,6 +22,8 @@ class GeminiProvider(LLMProvider):
     """Translate the common chat contract to Gemini's content-generation API."""
 
     name = "gemini"
+    _FALLBACK_MODELS = ("gemini-2.5-flash",)
+    _RETRYABLE_STATUS_CODES = frozenset({500, 502, 503, 504})
     _SCHEMA_TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array"})
     _TRUNCATED_SCHEMA_VALUES = frozenset({"[depth-limit]", "[unsupported]"})
 
@@ -39,22 +41,34 @@ class GeminiProvider(LLMProvider):
                 code="missing_provider_dependency",
             ) from exc
 
-        self._sync_client = genai.Client(api_key=settings.gemini_api_key)
+        from google.genai import types
+
+        self._sync_client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(
+                timeout=max(1000, int(settings.request_timeout * 1000)),
+            ),
+        )
         self._client = self._sync_client.aio
+        configured_models = {
+            model.casefold() for model in settings.models_for(self.name) if model.strip()
+        }
+        self._fallback_models = tuple(
+            model
+            for model in self._FALLBACK_MODELS
+            if not configured_models or model.casefold() in configured_models
+        )
 
     async def complete(self, request: ChatCompletionRequest) -> CompletionResult:
         contents, config = self._contents_and_config(request)
-        try:
-            response = await self._client.models.generate_content(
-                model=request.model,
-                contents=contents,
-                config=config,
-            )
-        except Exception as exc:
-            raise self._provider_exception(exc) from exc
+        response, model = await self._generate_content(
+            request.model,
+            contents,
+            config,
+        )
 
         return CompletionResult(
-            model=request.model,
+            model=model,
             text=getattr(response, "text", None) or "",
             finish_reason=self._finish_reason(response),
             usage=self._usage(getattr(response, "usage_metadata", None)),
@@ -64,16 +78,149 @@ class GeminiProvider(LLMProvider):
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[StreamEvent]:
         contents, config = self._contents_and_config(request)
+        model = request.model
+        yielded = False
         try:
             response_stream = await self._client.models.generate_content_stream(
-                model=request.model,
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            async for chunk in response_stream:
+                text = getattr(chunk, "text", None) or ""
+                yielded = yielded or bool(str(text).strip())
+                yield StreamEvent(text=text)
+        except Exception as exc:
+            fallback = self._fallback_model_for(model)
+            if yielded or fallback is None or not self._is_retryable(exc):
+                raise self._provider_exception(exc, model=model) from exc
+            LOGGER.warning(
+                "Gemini model request failed; retrying stream with fallback "
+                "model=%s failed_model=%s error=%s",
+                fallback,
+                model,
+                " ".join(str(exc).split())[:300],
+            )
+            try:
+                response_stream = await self._client.models.generate_content_stream(
+                    model=fallback,
+                    contents=contents,
+                    config=config,
+                )
+                async for chunk in response_stream:
+                    yield StreamEvent(text=getattr(chunk, "text", None) or "")
+            except Exception as fallback_exc:
+                raise self._provider_exception(
+                    fallback_exc,
+                    model=fallback,
+                    fallback_from=model,
+                ) from fallback_exc
+            return
+
+        if yielded:
+            return
+        fallback = self._fallback_model_for(model)
+        if fallback is None:
+            return
+        LOGGER.warning(
+            "Gemini model returned no text; retrying stream with fallback "
+            "model=%s failed_model=%s",
+            fallback,
+            model,
+        )
+        try:
+            response_stream = await self._client.models.generate_content_stream(
+                model=fallback,
                 contents=contents,
                 config=config,
             )
             async for chunk in response_stream:
                 yield StreamEvent(text=getattr(chunk, "text", None) or "")
+        except Exception as fallback_exc:
+            raise self._provider_exception(
+                fallback_exc,
+                model=fallback,
+                fallback_from=model,
+            ) from fallback_exc
+
+    async def _generate_content(
+        self,
+        model: str,
+        contents: list[Any],
+        config: Any,
+    ) -> tuple[Any, str]:
+        try:
+            response = await self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
         except Exception as exc:
-            raise self._provider_exception(exc) from exc
+            fallback = self._fallback_model_for(model)
+            if fallback is None or not self._is_retryable(exc):
+                raise self._provider_exception(exc, model=model) from exc
+            LOGGER.warning(
+                "Gemini model request failed; retrying with fallback model=%s "
+                "failed_model=%s error=%s",
+                fallback,
+                model,
+                " ".join(str(exc).split())[:300],
+            )
+            return await self._fallback_content(fallback, model, contents, config)
+        fallback = self._fallback_model_for(model)
+        if self._has_usable_output(response) or fallback is None:
+            return response, model
+        LOGGER.warning(
+            "Gemini model returned no usable text or tool call; retrying with "
+            "fallback model=%s failed_model=%s",
+            fallback,
+            model,
+        )
+        return await self._fallback_content(fallback, model, contents, config)
+
+    async def _fallback_content(
+        self,
+        fallback: str,
+        failed_model: str,
+        contents: list[Any],
+        config: Any,
+    ) -> tuple[Any, str]:
+        try:
+            response = await self._client.models.generate_content(
+                model=fallback,
+                contents=contents,
+                config=config,
+            )
+            return response, fallback
+        except Exception as fallback_exc:
+            raise self._provider_exception(
+                fallback_exc,
+                model=fallback,
+                fallback_from=failed_model,
+            ) from fallback_exc
+
+    @classmethod
+    def _has_usable_output(cls, response: Any) -> bool:
+        text = getattr(response, "text", None) or ""
+        return bool(str(text).strip()) or bool(cls._tool_calls(response))
+
+    def _fallback_model_for(self, model: str) -> str | None:
+        if model.casefold() in {
+            candidate.casefold() for candidate in self._fallback_models
+        }:
+            return None
+        return self._fallback_models[0] if self._fallback_models else None
+
+    @classmethod
+    def _is_retryable(cls, exc: Exception) -> bool:
+        for attribute in ("code", "status_code"):
+            value = getattr(exc, attribute, None)
+            try:
+                if int(value) in cls._RETRYABLE_STATUS_CODES:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return type(exc).__name__ in {"ServerError", "InternalServerError"}
 
     async def list_models(self) -> list[str]:
         """Read Gemini's current text-generation model catalog."""
@@ -327,7 +474,12 @@ class GeminiProvider(LLMProvider):
         return {"max_tokens": "length", "safety": "content_filter"}.get(value, value)
 
     @staticmethod
-    def _provider_exception(exc: Exception) -> ProviderError:
+    def _provider_exception(
+        exc: Exception,
+        *,
+        model: str | None = None,
+        fallback_from: str | None = None,
+    ) -> ProviderError:
         status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         if status_code == 401:
             return ProviderError(
@@ -338,7 +490,18 @@ class GeminiProvider(LLMProvider):
                 "Gemini rate-limited the request.", status_code=429, code="provider_rate_limited"
             )
         detail = " ".join(str(exc).split())[:600]
-        message = f"Gemini provider request failed: {type(exc).__name__}"
+        if fallback_from:
+            message = (
+                f"Gemini provider request failed for fallback model '{model}' "
+                f"after model '{fallback_from}' failed: {type(exc).__name__}"
+            )
+        elif model:
+            message = (
+                f"Gemini provider request failed for model '{model}': "
+                f"{type(exc).__name__}"
+            )
+        else:
+            message = f"Gemini provider request failed: {type(exc).__name__}"
         if detail:
             message += f" — {detail}"
         return ProviderError(message + ".")

@@ -9,12 +9,14 @@ import time
 from pbrainz.config import Settings
 from pbrainz.conversation_service import ConversationService, TraceWriter
 from pbrainz.exceptions import ProviderError
+from pbrainz.memory import MemoryPrimitiveService
 from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.tts import TTSService
 
 from .catalog import ToolCatalogCache, hydrate_request
 from .client import BridgeClient
 from .handler import complete_and_deliver, preview, request_message
+from .memory_context import ActiveMemoryContextCache
 from .protocol import NAMESPACE, BridgeClientError, BridgeCommandError
 from .state import BridgeRuntimeMonitor
 from .transport import FileBridgeTransport
@@ -78,6 +80,7 @@ async def run_bridge_pump(
     tts_service: TTSService | None = None,
     *,
     trace_writer: TraceWriter | None = None,
+    active_memory_context: ActiveMemoryContextCache | None = None,
 ) -> None:
     """Poll Project Hoomans chat requests and deliver provider responses."""
     # The monitor and transport must use the same resolved path. This also
@@ -90,6 +93,8 @@ async def run_bridge_pump(
     conversation_service = ConversationService(
         settings, providers, trace_writer=trace_writer
     )
+    primitive_service = MemoryPrimitiveService(settings)
+    active_context = active_memory_context or ActiveMemoryContextCache()
     observed_runtime_id: str | None = None
     observed_state: tuple[
         bool, bool, str | None, str | None, str | None, tuple[str, ...]
@@ -128,6 +133,7 @@ async def run_bridge_pump(
                 transport.root,
             )
             observed_runtime_id = state.runtime_id
+            active_context.clear()
             sync_supported = None
             if voice_consumer:
                 voice_consumer.reset()
@@ -182,17 +188,27 @@ async def run_bridge_pump(
                         state.runtime_id,
                     )
                     sync_supported = True
+                    reported_context = sync_batch.get("memory_context")
+                    if isinstance(reported_context, dict):
+                        active_context.update(reported_context, state.runtime_id)
                     message_ids = conversation_service.record_message_batch(sync_batch)
-                    if message_ids:
+                    event_ids = primitive_service.record_batch(sync_batch)
+                    if message_ids or event_ids:
+                        arguments: dict[str, object] = {}
+                        if message_ids:
+                            arguments["message_ids"] = list(message_ids)
+                        if event_ids:
+                            arguments["event_ids"] = list(event_ids)
                         await client.call(
                             NAMESPACE,
                             "ackConversationSync",
-                            {"message_ids": list(message_ids)},
+                            arguments,
                             state.runtime_id,
                         )
                         LOGGER.info(
-                            "Conversation memory sync acknowledged messages=%s",
+                            "Conversation memory sync acknowledged messages=%s primitives=%s",
                             len(message_ids),
+                            len(event_ids),
                         )
                 except BridgeCommandError as error:
                     if error.code in {"UNKNOWN_COMMAND", "UNKNOWN_NAMESPACE"}:

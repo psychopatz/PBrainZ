@@ -7,7 +7,12 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from pbrainz.conversation_runtime import SpeechMode, Utterance, VoiceBinding
+from pbrainz.conversation_runtime import (
+    AudioPresentation,
+    SpeechMode,
+    Utterance,
+    VoiceBinding,
+)
 from pbrainz.tts import TTSService
 from pbrainz.tts.text import normalize_tts_text
 
@@ -146,6 +151,7 @@ def utterance_from_packet(
         mode = SpeechMode(mode_value)
     except ValueError:
         mode = SpeechMode.RESPONSE
+    audio_presentation = AudioPresentation.from_mapping(speech)
     return Utterance(
         utterance_id=utterance_id,
         conversation_id=conversation_id,
@@ -161,6 +167,7 @@ def utterance_from_packet(
             _value(speech, "can_interrupt", "canInterrupt")
         ),
         voice_binding=resolved_binding,
+        audio_presentation=audio_presentation,
         created_at=time.monotonic(),
     )
 

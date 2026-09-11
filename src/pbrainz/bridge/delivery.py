@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from pbrainz.conversation_runtime import Utterance, VoiceBinding
+from pbrainz.conversation_runtime import AudioPresentation, Utterance, VoiceBinding
 from pbrainz.tts import TTSService
 from pbrainz.tts.text import normalize_tts_text
 
@@ -63,6 +63,15 @@ def _build_tts_utterance(
                 binding.slot,
             )
             return None
+        audio_presentation = AudioPresentation.from_mapping(
+            context.get("audio_presentation")
+            or context.get("audioPresentation")
+            or context.get("audio_context")
+            or context.get("audioContext")
+            or context.get("speech")
+            or context.get("speech_policy")
+            or context
+        )
         utterance = Utterance(
             utterance_id=f"{conversation_id}:{request_id}",
             conversation_id=conversation_id,
@@ -70,6 +79,7 @@ def _build_tts_utterance(
             speaker_npc_uuid=npc_id,
             text=speech_text,
             voice_binding=binding,
+            audio_presentation=audio_presentation,
         )
         LOGGER.info(
             "NPC TTS utterance prepared npc=%s request=%s conversation=%s slot=%s chars=%s",

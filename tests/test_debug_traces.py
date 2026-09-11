@@ -1,7 +1,7 @@
 from pbrainz.config import Settings
 from pbrainz.conversation_service import ConversationRequest, ConversationService
 from pbrainz.database import SettingsDatabase
-from pbrainz.memory import MemoryScope
+from pbrainz.memory import MemoryIdentity, MemoryScope
 from pbrainz.providers.base import CompletionResult
 
 
@@ -41,6 +41,17 @@ class _Providers:
         return CompletionResult(request.model, "Hello.", reasoning="public reasoning")
 
 
+def _identity(world_uuid: str) -> MemoryIdentity:
+    return MemoryIdentity.from_mapping(
+        world_uuid,
+        {
+            "world_mode": "multiplayer",
+            "server_instance_id": "trace-server",
+            "server_world_generation": world_uuid,
+        },
+    )
+
+
 def test_conversation_trace_capture_has_input_prompt_and_response(tmp_path) -> None:
     events: list[dict] = []
 
@@ -53,6 +64,7 @@ def test_conversation_trace_capture_has_input_prompt_and_response(tmp_path) -> N
         llm_trace_capture=True,
     )
     service = ConversationService(settings, _Providers(), trace_writer=writer)
+    identity = _identity("world")
 
     import asyncio
 
@@ -60,9 +72,10 @@ def test_conversation_trace_capture_has_input_prompt_and_response(tmp_path) -> N
         service.complete(
             ConversationRequest(
                 request_id="trace-request",
-                scope=MemoryScope("world", "player", "npc"),
+                scope=MemoryScope(identity.world_uuid, "player", "npc"),
                 session_id="session",
                 message="What do you see?",
+                memory_identity=identity,
                 scene={"weather": "rain"},
             )
         )
@@ -88,6 +101,7 @@ def test_conversation_trace_capture_disabled_does_not_call_writer(tmp_path) -> N
         _Providers(),
         trace_writer=lambda **event: events.append(event),
     )
+    identity = _identity("world")
 
     import asyncio
 
@@ -95,9 +109,10 @@ def test_conversation_trace_capture_disabled_does_not_call_writer(tmp_path) -> N
         service.complete(
             ConversationRequest(
                 request_id="no-trace",
-                scope=MemoryScope("world", "player", "npc"),
+                scope=MemoryScope(identity.world_uuid, "player", "npc"),
                 session_id="session",
                 message="Hello",
+                memory_identity=identity,
             )
         )
     )

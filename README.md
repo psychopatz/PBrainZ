@@ -124,6 +124,12 @@ missing Piper, models, or audio output still automatically falls back to
 text-only conversation. Only compact speech lifecycle events cross the bridge;
 audio remains local to the client.
 
+Game messages can also carry a compact per-utterance audio presentation such as
+`effect_profile = "radio"`, `environment = "underwater"`, and an `intensity`
+from `0` to `1`. PBrainZ applies these as lightweight local DSP after Piper
+synthesis, including streamed chunks, so the bridge sends metadata rather than
+audio and the effect does not require a second TTS inference.
+
 `tkinter` is included with standard Windows Python installations. On Linux,
 install the distribution's Tk package if it is missing (for example,
 `sudo apt install python3-tk` on Debian/Ubuntu).
@@ -136,9 +142,9 @@ copy self-contained and movable. Set `PBRAINZ_DB` to override the database
 location. The database is created fresh for each portable copy, is local-only,
 and should be kept private. Never include `data/` in a release archive or
 upload it with the executable; it is runtime state and may contain provider
-credentials. Existing `data/hoomansllm.db` files from older releases are
-merged into `data/pbrainz.db` on the first PBrainZ launch; existing PBrainZ
-values remain authoritative and the old file is retained as a backup.
+credentials. PBrainZ reads only the current `pbrainz.db` at that selected
+location; it does not import settings from another filename or user-profile
+directory.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
 startup. By default startup does not make network requests; the panel's
@@ -355,13 +361,27 @@ fallback dialogue are marked ineligible for future NPC context and RAG.
 
 ## NPC memory and context
 
-NPC memory is separate from the settings database. PBrainZ creates one
-SQLite database per save/world under the configured `memory_root` (by default,
-the `memory/` directory beside the settings database). The filename contains a
-short hash of the stable Project Zomboid save identifier, while the full
-identifier is stored in the database metadata. Memory rows are scoped by the
-exact `(world_uuid, player_uuid, npc_uuid)` tuple, so NPCs, players, and saves
-cannot bleed into one another.
+NPC memory is separate from the settings database. For single-player, the
+bridge supplies the exact save path relative to `<Zomboid>/Saves`, and PBrainZ
+stores the hashed SQLite database inside that save at `PBrainZ/memory/`.
+Deleting that save therefore removes its PBrainZ records with it. Client-side
+multiplayer memories remain external and use a canonical hash namespace made
+from the server instance and server world generation. The active save is
+supplied by the game's world lifecycle, never guessed from the newest folder
+on disk. The native
+Memories tab automatically selects the currently reported save while still
+allowing manual selection, and displays known NPC names instead of requiring
+users to read internal IDs. It can browse and delete durable memory-layer
+records without touching raw conversation turns.
+An explicit `memory_root` setting remains available as an override for custom
+or portable deployments.
+
+Gameplay events enter memory through a typed, retryable primitive outbox. The
+initial primitives are `first_meeting` (created after a successful name
+disclosure) and `pre_outbreak_relationship` (created from authoritative
+lifelong-relationship assignment). Event dates carry machine fields for
+`game_day`, `world_age_hours`, and the in-world calendar, plus a derived label;
+PBrainZ never asks the provider to parse a free-form date.
 
 The store has a single shared `memories` table rather than NPC-specific tables,
 conversation sessions/turns, commitments, provenance, and indexes. Canonical

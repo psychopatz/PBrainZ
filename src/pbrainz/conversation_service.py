@@ -17,6 +17,7 @@ from pbrainz.memory import (
     ConversationTurn,
     DaySynopsis,
     MemoryEpisode,
+    MemoryIdentity,
     MemoryQuery,
     MemoryRecord,
     MemoryScope,
@@ -27,7 +28,6 @@ from pbrainz.memory import (
     StructuredFact,
     TurnWriteResult,
     is_context_eligible,
-    memory_root_for_settings,
 )
 from pbrainz.providers.base import CompletionResult
 from pbrainz.providers.registry import ProviderRegistry
@@ -58,6 +58,7 @@ class ConversationRequest:
     scope: MemoryScope
     session_id: str
     message: str
+    memory_identity: MemoryIdentity | None = None
     message_id: str | None = None
     npc_name: str = "the survivor"
     player_name: str = "the player"
@@ -86,8 +87,18 @@ class ConversationRequest:
         context = value.get("conversation_context") or value.get("context") or value
         if not isinstance(context, dict):
             context = value
-        world_uuid = context.get("world_uuid") or context.get("worldUUID")
-        player_uuid = context.get("player_uuid") or context.get("playerUUID")
+        world_uuid = (
+            context.get("world_uuid")
+            or context.get("worldUUID")
+            or value.get("world_uuid")
+            or value.get("worldUUID")
+        )
+        player_uuid = (
+            context.get("player_uuid")
+            or context.get("playerUUID")
+            or value.get("player_uuid")
+            or value.get("playerUUID")
+        )
         npc_uuid = context.get("npc_uuid") or context.get("npcUUID") or value.get("npc_id")
         message = context.get("message") or context.get("current_player_message")
         required = (world_uuid, player_uuid, npc_uuid, message)
@@ -95,6 +106,12 @@ class ConversationRequest:
             raise ValueError(
                 "structured conversation requests require world, player, NPC, and message"
             )
+        identity_context = dict(value)
+        identity_context.update(context)
+        nested_memory_context = context.get("memory_context") or context.get("memoryContext")
+        if isinstance(nested_memory_context, dict):
+            identity_context.update(nested_memory_context)
+        memory_identity = MemoryIdentity.from_mapping(world_uuid, identity_context)
         request_id = str(
             value.get("request_id") or context.get("request_id") or uuid.uuid4().hex
         )
@@ -111,9 +128,10 @@ class ConversationRequest:
         )
         return cls(
             request_id=request_id,
-            scope=MemoryScope(str(world_uuid), str(player_uuid), str(npc_uuid)),
+            scope=MemoryScope(memory_identity.world_uuid, str(player_uuid), str(npc_uuid)),
             session_id=session_id,
             message=str(message).strip()[:4000],
+            memory_identity=memory_identity,
             message_id=message_id,
             npc_name=str(context.get("npc_name") or context.get("npcName") or "the survivor"),
             player_name=str(
@@ -329,6 +347,11 @@ class ConversationService:
         *,
         stream_consumer: Callable[[str], Awaitable[None]] | None = None,
     ) -> ConversationResult:
+        if request.memory_identity is None:
+            raise ValueError("structured conversation requests require memory identity")
+        if request.scope.world_uuid != request.memory_identity.world_uuid:
+            raise ValueError("conversation scope does not match memory identity")
+        identity = request.memory_identity
         if self.debug_trace_enabled():
             self.record_debug_trace(
                 "conversation.input",
@@ -363,7 +386,7 @@ class ConversationService:
                 session_id=request.session_id,
                 source="pbrainz.conversation",
             )
-        store = self._store(request.scope.world_uuid)
+        store = self._store(identity)
         diagnostics: dict[str, Any] = {
             "world_uuid": request.scope.world_uuid,
             "player_uuid": request.scope.player_uuid,
@@ -478,6 +501,17 @@ class ConversationService:
             LOGGER.warning("NPC memory unavailable; continuing without it: %s", error)
 
         provider_name, model_name = self.providers.resolve(request.provider, request.model)
+        LOGGER.info(
+            "NPC provider request prepared npc=%s request=%s provider=%s model=%s "
+            "retrieval_needed=%s retrieved=%s tools=%s",
+            request.scope.npc_uuid,
+            request.request_id,
+            provider_name,
+            model_name,
+            retrieval_needed,
+            len(matches),
+            len(request.available_tools),
+        )
         configured_profile = active_template_profile(
             self.settings.template_profiles_json,
             self.settings.active_template_profile_id,
@@ -571,6 +605,17 @@ class ConversationService:
                 result = await self.providers.complete(provider_name, provider_request)
                 diagnostics["provider_streaming"] = False
         except Exception as error:
+            LOGGER.error(
+                "NPC provider request failed npc=%s request=%s provider=%s model=%s "
+                "retrieval_needed=%s retrieved=%s: %s",
+                request.scope.npc_uuid,
+                request.request_id,
+                provider_name,
+                model_name,
+                retrieval_needed,
+                len(matches),
+                error,
+            )
             if self.debug_trace_enabled():
                 self.record_debug_trace(
                     "provider.error",
@@ -800,6 +845,7 @@ class ConversationService:
             {
                 "provider": provider_name,
                 "model": model_name,
+                "model_used": result.model,
                 "context": built.diagnostics,
                 "context_message_count": len(built.messages),
                 "finish_reason": result.finish_reason or "unknown",
@@ -899,7 +945,19 @@ class ConversationService:
                 "conversation sync messages require world, player, NPC, message ID, "
                 "conversation ID, and text"
             )
-        scope = MemoryScope(world_uuid, player_uuid, npc_uuid)
+        memory_context = (
+            message.get("memory_context")
+            or message.get("memoryContext")
+            or message.get("conversation_context")
+            or message.get("context")
+            or message
+        )
+        if not isinstance(memory_context, dict):
+            memory_context = message
+        identity_context = dict(message)
+        identity_context.update(memory_context)
+        memory_identity = MemoryIdentity.from_mapping(world_uuid, identity_context)
+        scope = MemoryScope(memory_identity.world_uuid, player_uuid, npc_uuid)
         source = message.get("source")
         metadata: dict[str, Any] = {
             "source": "project-hoomans-sync",
@@ -938,7 +996,7 @@ class ConversationService:
                 message_id,
             )
             return result
-        store = self._store(world_uuid)
+        store = self._store(memory_identity)
         store.ensure_session(
             conversation_id,
             scope,
@@ -995,12 +1053,17 @@ class ConversationService:
         )
         return tuple(message_id for message_id in acknowledged if message_id)
 
-    def _store(self, world_uuid: str) -> SQLiteMemoryStore:
-        if world_uuid not in self._stores:
-            self._stores[world_uuid] = SQLiteMemoryStore(
-                memory_root_for_settings(self.settings), world_uuid
+    def _store(self, identity: MemoryIdentity) -> SQLiteMemoryStore:
+        """Return a cached store without conflating roots with equal IDs."""
+
+        cache_root = identity.root_for(self.settings)
+        cache_key = identity.cache_key + "|" + str(cache_root)
+        if cache_key not in self._stores:
+            self._stores[cache_key] = SQLiteMemoryStore(
+                cache_root,
+                identity.world_uuid,
             )
-        return self._stores[world_uuid]
+        return self._stores[cache_key]
 
     def _consolidate(self, store: SQLiteMemoryStore, request: ConversationRequest) -> None:
         turns = store.recent_turns(request.session_id, request.scope, limit=24)
@@ -1148,7 +1211,9 @@ class ConversationService:
 
 _HISTORICAL_CUES = re.compile(
     r"\b(remember|yesterday|earlier|before|last|morning|afternoon|said|told|"
-    r"happened|trust|trusted|promise|promised|agreed|again|what did|why do you)\b",
+    r"happened|trust|trusted|promise|promised|agreed|again|what did|why do you|"
+    r"when did|first met|first meet|have we met|did we meet|how did we meet|"
+    r"where did we meet|our first meeting|since we met)\b",
     re.I,
 )
 

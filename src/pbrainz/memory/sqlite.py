@@ -188,6 +188,17 @@ class SQLiteMemoryStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS memory_entities (
+                    world_uuid TEXT NOT NULL,
+                    entity_uuid TEXT NOT NULL,
+                    entity_kind TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'memory',
+                    PRIMARY KEY(world_uuid, entity_uuid, entity_kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_entities_lookup
+                    ON memory_entities(world_uuid, entity_uuid, entity_kind);
                 CREATE TABLE IF NOT EXISTS conversation_sessions (
                     session_id TEXT PRIMARY KEY,
                     world_uuid TEXT NOT NULL,
@@ -464,6 +475,70 @@ class SQLiteMemoryStore:
             connection.commit()
         return self._session(row)
 
+    def upsert_entity(
+        self,
+        entity_uuid: str,
+        display_name: str,
+        *,
+        entity_kind: str = "npc",
+        source: str = "memory",
+    ) -> None:
+        """Remember a user-facing name inside this world database only."""
+
+        entity_uuid = _safe_text(entity_uuid, 256)
+        display_name = _safe_text(display_name, 256)
+        entity_kind = _safe_text(entity_kind, 32) or "npc"
+        source = _safe_text(source, 64) or "memory"
+        if not entity_uuid or not display_name:
+            return
+        self.initialize()
+        timestamp = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._upsert_entity_connection(
+                connection,
+                entity_uuid,
+                display_name,
+                entity_kind,
+                source,
+                timestamp,
+            )
+            connection.commit()
+
+    def _upsert_entity_connection(
+        self,
+        connection: sqlite3.Connection,
+        entity_uuid: str,
+        display_name: str,
+        entity_kind: str,
+        source: str,
+        timestamp: str,
+    ) -> None:
+        entity_uuid = _safe_text(entity_uuid, 256)
+        display_name = _safe_text(display_name, 256)
+        if not entity_uuid or not display_name:
+            return
+        connection.execute(
+            """
+            INSERT INTO memory_entities(
+                world_uuid, entity_uuid, entity_kind, display_name,
+                last_seen_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(world_uuid, entity_uuid, entity_kind) DO UPDATE SET
+                display_name = excluded.display_name,
+                last_seen_at = excluded.last_seen_at,
+                source = excluded.source
+            """,
+            (
+                self.world_uuid,
+                entity_uuid,
+                _safe_text(entity_kind, 32) or "npc",
+                display_name,
+                timestamp,
+                _safe_text(source, 64) or "memory",
+            ),
+        )
+
     def add_turn(
         self,
         session_id: str,
@@ -558,6 +633,31 @@ class SQLiteMemoryStore:
             if row is None:
                 raise ValueError("conversation session does not match memory scope")
             turn_index = int(row["turn_count"]) + 1
+            default_kind = "player" if str(role).casefold() == "user" else "npc"
+            self._upsert_entity_connection(
+                connection,
+                speaker_uuid
+                or (scope.player_uuid if default_kind == "player" else scope.npc_uuid),
+                speaker_name or "",
+                _safe_text(speaker_kind, 32) or default_kind,
+                "conversation",
+                timestamp,
+            )
+            for participant in (metadata or {}).get("participants", ()):
+                if not isinstance(participant, dict):
+                    continue
+                self._upsert_entity_connection(
+                    connection,
+                    participant.get("id") or participant.get("speakerID") or "",
+                    participant.get("name")
+                    or participant.get("speakerName")
+                    or "",
+                    participant.get("kind")
+                    or participant.get("speakerKind")
+                    or "npc",
+                    "conversation",
+                    timestamp,
+                )
             connection.execute(
                 """
                 INSERT INTO conversation_turns(
@@ -1302,7 +1402,8 @@ class SQLiteMemoryStore:
             SELECT 'memory' AS record_kind, memory_id AS record_id,
                    world_uuid, player_uuid, npc_uuid, game_day,
                    memory_type AS record_type, content, visibility, importance,
-                   state, created_at, updated_at, tags_json AS metadata_json
+                   state, created_at, updated_at, tags_json AS metadata_json,
+                   provenance_json
             FROM memories
             WHERE active = 1
             UNION ALL
@@ -1312,14 +1413,16 @@ class SQLiteMemoryStore:
                    summary || CASE WHEN key_facts_json = '[]' THEN ''
                        ELSE char(10) || 'Facts: ' || key_facts_json END AS content,
                    visibility, importance, CASE WHEN active = 1 THEN 'active' ELSE 'deleted' END,
-                   created_at, updated_at, key_facts_json AS metadata_json
+                   created_at, updated_at, key_facts_json AS metadata_json,
+                   '{}' AS provenance_json
             FROM conversation_episodes
             WHERE active = 1
             UNION ALL
             SELECT 'fact' AS record_kind, fact_id AS record_id,
                    world_uuid, player_uuid, npc_uuid, game_day,
                    'FACT/' || kind AS record_type, content, visibility, importance,
-                   status, created_at, updated_at, provenance_json AS metadata_json
+                   status, created_at, updated_at, provenance_json AS metadata_json,
+                   provenance_json
             FROM structured_facts
             WHERE active = 1 AND status = 'active'
             UNION ALL
@@ -1328,7 +1431,7 @@ class SQLiteMemoryStore:
                    world_uuid, player_uuid, npc_uuid, game_day,
                    'DAY_SYNOPSIS' AS record_type, synopsis, 'SYSTEM' AS visibility,
                    0.7 AS importance, 'active' AS state, updated_at, updated_at,
-                   commitments_json AS metadata_json
+                   commitments_json AS metadata_json, '{}' AS provenance_json
             FROM day_synopses
             WHERE synopsis != '' OR commitments_json != '[]' OR plans_json != '[]'
                 OR claims_json != '[]' OR unresolved_topics_json != '[]'
@@ -1338,11 +1441,17 @@ class SQLiteMemoryStore:
         if needle:
             predicates.append(
                 "(LOWER(content) LIKE ? OR LOWER(record_type) LIKE ? "
-                "OR LOWER(player_uuid) LIKE ? OR LOWER(npc_uuid) LIKE ?)"
+                "OR LOWER(player_uuid) LIKE ? OR LOWER(npc_uuid) LIKE ? "
+                "OR EXISTS (SELECT 1 FROM memory_entities AS entity "
+                "WHERE entity.world_uuid = saved.world_uuid "
+                "AND (entity.entity_uuid = saved.player_uuid "
+                "OR entity.entity_uuid = saved.npc_uuid) "
+                "AND LOWER(entity.display_name) LIKE ?))"
             )
             pattern = f"%{needle}%"
-            query_args.extend([pattern] * 4)
+            query_args.extend([pattern] * 5)
         where = " AND ".join(predicates)
+        names: dict[tuple[str, str], str] = {}
         with self._connect() as connection:
             total = int(
                 connection.execute(
@@ -1358,8 +1467,30 @@ class SQLiteMemoryStore:
                 """,
                 [*query_args, bounded_limit, bounded_offset],
             ).fetchall()
+            entity_ids = {
+                (str(row["npc_uuid"]), "npc")
+                for row in rows
+                if row["npc_uuid"]
+            } | {
+                (str(row["player_uuid"]), "player")
+                for row in rows
+                if row["player_uuid"]
+            }
+            if entity_ids:
+                entity_rows = connection.execute(
+                    "SELECT entity_uuid, entity_kind, display_name "
+                    "FROM memory_entities WHERE world_uuid = ?",
+                    (self.world_uuid,),
+                ).fetchall()
+                names = {
+                    (str(row["entity_uuid"]), str(row["entity_kind"])): str(
+                        row["display_name"]
+                    )
+                    for row in entity_rows
+                    if (str(row["entity_uuid"]), str(row["entity_kind"])) in entity_ids
+                }
         return {
-            "items": [self._saved_memory_row(row) for row in rows],
+            "items": [self._saved_memory_row(row, names) for row in rows],
             "total": total,
             "limit": bounded_limit,
             "offset": bounded_offset,
@@ -1367,14 +1498,24 @@ class SQLiteMemoryStore:
         }
 
     @staticmethod
-    def _saved_memory_row(row: sqlite3.Row) -> dict[str, Any]:
+    def _saved_memory_row(
+        row: sqlite3.Row,
+        names: dict[tuple[str, str], str] | None = None,
+    ) -> dict[str, Any]:
         content = _safe_text(row["content"], 4000)
+        names = names or {}
+        provenance = _object(row["provenance_json"], {})
+        event_time = provenance.get("event_time")
+        if not isinstance(event_time, dict):
+            event_time = None
         return {
             "record_kind": row["record_kind"],
             "record_id": row["record_id"],
             "world_uuid": row["world_uuid"],
             "player_uuid": row["player_uuid"],
             "npc_uuid": row["npc_uuid"],
+            "player_name": names.get((str(row["player_uuid"]), "player")),
+            "npc_name": names.get((str(row["npc_uuid"]), "npc")),
             "game_day": row["game_day"],
             "record_type": row["record_type"],
             "content": content,
@@ -1384,6 +1525,8 @@ class SQLiteMemoryStore:
             "state": row["state"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "primitive_type": provenance.get("primitive_type"),
+            "event_time": event_time,
         }
 
     def delete_saved_memory(

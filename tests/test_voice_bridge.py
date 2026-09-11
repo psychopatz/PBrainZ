@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from pbrainz.bridge import BridgeState
+from pbrainz.bridge.delivery import _build_tts_utterance
 from pbrainz.bridge.handler import _AmbientSpeechStream, complete_and_deliver
 from pbrainz.bridge.voice import (
     VOICE_CHANNEL,
@@ -177,6 +178,53 @@ def test_voice_packet_maps_to_existing_utterance_contract() -> None:
     assert utterance.voice_binding.slot == "VoiceFemale:2"
 
 
+def test_voice_packet_maps_audio_presentation_without_trusting_unknown_values() -> None:
+    value = packet()
+    value["speech"] = {
+        "mode": "RESPONSE",
+        "effect_profile": "walkie-talkie",
+        "environment": "water",
+        "intensity": 0.75,
+        "unknown": "ignored",
+    }
+
+    utterance = utterance_from_packet(value, FakeTTS())
+
+    assert utterance is not None
+    assert utterance.audio_presentation.as_dict() == {
+        "effect_profile": "radio",
+        "environment": "underwater",
+        "intensity": 0.75,
+    }
+
+
+def test_legacy_tts_request_maps_audio_presentation_from_context() -> None:
+    request = {
+        "conversation_context": {
+            "session_id": "conversation-one",
+            "voice_binding": {
+                "npc_uuid": "npc-one",
+                "slot": "VoiceFemale:2",
+            },
+            "audio_presentation": {
+                "effect_profile": "telephone",
+                "intensity": 0.5,
+            },
+        }
+    }
+
+    utterance = _build_tts_utterance(
+        FakeTTS(), request, "request-one", "npc-one", "Can you hear me?"
+    )
+
+    assert utterance is not None
+    assert utterance.audio_presentation.as_dict() == {
+        "effect_profile": "telephone",
+        "environment": "normal",
+        "intensity": 0.5,
+    }
+
+
 def test_player_voice_packet_uses_player_identity_and_binding() -> None:
     value = packet()
     value.update(
@@ -287,6 +335,9 @@ async def test_ambient_llm_streams_local_tts_and_marks_final_message_managed(tmp
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "ambient-session",

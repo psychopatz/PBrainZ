@@ -40,13 +40,15 @@ from pbrainz.database import (
 from pbrainz.memory import (
     DaySynopsis,
     MemoryEpisode,
+    MemoryIdentity,
     MemoryRecord,
     MemoryScope,
     MemoryType,
     MemoryVisibility,
     SQLiteMemoryStore,
     StructuredFact,
-    memory_root_for_settings,
+    list_memory_worlds,
+    public_memory_world,
 )
 from pbrainz.paths import normalize_zomboid_path
 from pbrainz.providers.registry import ProviderRegistry
@@ -447,15 +449,60 @@ async def clear_ui_debug_traces(request: Request) -> dict[str, object]:
     return {"status": "ok", "deleted": deleted}
 
 
+def _memory_world_records(request: Request) -> list[dict[str, object]]:
+    return list_memory_worlds(request.app.state.settings)
+
+
 def _memory_worlds(request: Request) -> list[dict[str, object]]:
-    return SQLiteMemoryStore.list_worlds(memory_root_for_settings(request.app.state.settings))
+    return [public_memory_world(item) for item in _memory_world_records(request)]
 
 
 def _memory_store(request: Request, world_uuid: str) -> SQLiteMemoryStore:
-    worlds = {item["world_uuid"] for item in _memory_worlds(request)}
-    if world_uuid not in worlds:
+    item = next(
+        (item for item in _memory_world_records(request) if item["world_uuid"] == world_uuid),
+        None,
+    )
+    if item is None:
         raise HTTPException(status_code=404, detail=f"Memory world '{world_uuid}' was not found")
-    return SQLiteMemoryStore(memory_root_for_settings(request.app.state.settings), world_uuid)
+    return SQLiteMemoryStore(item["_root"], world_uuid)
+
+
+def _active_memory_context(request: Request) -> dict[str, object]:
+    cache = getattr(request.app.state, "active_memory_context", None)
+    if cache is None or not hasattr(cache, "as_dict"):
+        return {"status": "unavailable", "reason": "active_context_unconfigured"}
+    active = dict(cache.as_dict())
+    if active.get("status") != "active":
+        return active
+    world_uuid = str(active.get("world_uuid") or "")
+    matching = next(
+        (
+            item
+            for item in _memory_world_records(request)
+            if str(item.get("world_uuid") or "") == world_uuid
+        ),
+        None,
+    )
+    active["exists"] = matching is not None
+    active["storage_kind"] = (
+        matching.get("storage_kind")
+        if matching is not None
+        else "save_local"
+        if active.get("world_mode") == "singleplayer"
+        else "external"
+    )
+    if matching is not None:
+        for key in (
+            "save_relative_path",
+            "memory_count",
+            "session_count",
+            "turn_count",
+            "episode_count",
+            "fact_count",
+        ):
+            if matching.get(key) is not None:
+                active[key] = matching[key]
+    return active
 
 
 @router.get("/api/memory/worlds", tags=["memory"])
@@ -463,6 +510,13 @@ async def ui_memory_worlds(request: Request) -> dict[str, object]:
     """List existing save-scoped memory databases without creating any."""
 
     return {"status": "ok", "worlds": _memory_worlds(request)}
+
+
+@router.get("/api/memory/active", tags=["memory"])
+async def ui_memory_active(request: Request) -> dict[str, object]:
+    """Return the fresh save identity reported by the running game client."""
+
+    return {"status": "ok", "active": _active_memory_context(request)}
 
 
 @router.get("/api/memory", tags=["memory"])
@@ -477,11 +531,32 @@ async def ui_memory(
     """Return a bounded, searchable view of reusable memory-layer records."""
 
     worlds = _memory_worlds(request)
-    selected_world = world_uuid or (str(worlds[0]["world_uuid"]) if worlds else None)
+    active = _active_memory_context(request)
+    selected_world = world_uuid or (
+        str(active["world_uuid"])
+        if active.get("status") == "active" and active.get("world_uuid")
+        else str(worlds[0]["world_uuid"]) if worlds else None
+    )
     if selected_world is None:
         return {
             "status": "ok",
             "world_uuid": None,
+            "items": [],
+            "total": 0,
+            "limit": max(1, min(int(limit), 200)),
+            "offset": max(0, int(offset)),
+            "worlds": worlds,
+        }
+    known_world = next(
+        (item for item in worlds if str(item["world_uuid"]) == selected_world),
+        None,
+    )
+    if known_world is None and active.get("status") == "active" and str(
+        active.get("world_uuid")
+    ) == selected_world:
+        return {
+            "status": "ok",
+            "world_uuid": selected_world,
             "items": [],
             "total": 0,
             "limit": max(1, min(int(limit), 200)),
@@ -531,8 +606,12 @@ async def seed_mock_memories(
 ) -> dict[str, object]:
     """Create an idempotent fixture for testing the real memory retriever."""
 
-    scope = MemoryScope(body.world_uuid, body.player_uuid, body.npc_uuid)
-    store = SQLiteMemoryStore(memory_root_for_settings(request.app.state.settings), body.world_uuid)
+    memory_identity = MemoryIdentity.from_mapping(body.world_uuid, body.model_dump())
+    scope = MemoryScope(memory_identity.world_uuid, body.player_uuid, body.npc_uuid)
+    store = SQLiteMemoryStore(
+        memory_identity.root_for(request.app.state.settings),
+        memory_identity.world_uuid,
+    )
     participants = (body.player_uuid, body.npc_uuid)
     store.remember(
         MemoryRecord(
@@ -603,7 +682,7 @@ async def seed_mock_memories(
     return {
         "status": "ok",
         "seeded": True,
-        "world_uuid": body.world_uuid,
+        "world_uuid": memory_identity.world_uuid,
         "stats": store.stats(),
         "worlds": _memory_worlds(request),
     }
@@ -630,11 +709,25 @@ async def mock_chat(request: Request, body: MockChatRequest) -> dict[str, object
     session_id = body.session_id or (
         f"mock-session:{body.world_uuid}:{body.player_uuid}:{body.npc_uuid}"
     )
+    memory_identity = MemoryIdentity.from_mapping(
+        body.world_uuid,
+        {
+            "world_mode": body.world_mode,
+            "save_relative_path": body.save_relative_path,
+            "server_instance_id": body.server_instance_id,
+            "server_world_generation": body.server_world_generation,
+        },
+    )
     conversation = ConversationRequest(
         request_id=f"mock-chat:{uuid.uuid4().hex}",
-        scope=MemoryScope(body.world_uuid, body.player_uuid, body.npc_uuid),
+        scope=MemoryScope(
+            memory_identity.world_uuid,
+            body.player_uuid,
+            body.npc_uuid,
+        ),
         session_id=session_id,
         message=body.message.strip(),
+        memory_identity=memory_identity,
         npc_name=body.npc_name,
         player_name=body.player_name,
         character_card=body.character_card,

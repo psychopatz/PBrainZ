@@ -313,7 +313,12 @@ async def complete_and_deliver(
                     await ambient_tts.cancel_local_audio()
             result = conversation_result.completion
             provider_name = str(conversation_result.diagnostics.get("provider", "unknown"))
-            model_name = str(conversation_result.diagnostics.get("model", result.model))
+            model_name = str(
+                conversation_result.diagnostics.get(
+                    "model_used",
+                    conversation_result.diagnostics.get("model", result.model),
+                )
+            )
             if conversation_service.settings.llm_diagnostics:
                 LOGGER.info(
                     "NPC context built npc=%s session=%s recent=%s retrieved=%s chars=%s",

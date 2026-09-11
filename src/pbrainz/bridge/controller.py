@@ -9,6 +9,7 @@ from pbrainz.conversation_service import TraceWriter
 from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.tts import TTSService
 
+from .memory_context import ActiveMemoryContextCache
 from .pump import run_bridge_pump
 from .state import BridgeRuntimeMonitor
 
@@ -24,12 +25,14 @@ class BridgeController:
         tts_service: TTSService | None = None,
         *,
         trace_writer: TraceWriter | None = None,
+        active_memory_context: ActiveMemoryContextCache | None = None,
     ) -> None:
         self.settings = settings
         self.providers = providers
         self.monitor = monitor
         self.tts_service = tts_service
         self.trace_writer = trace_writer
+        self.active_memory_context = active_memory_context
         self._enabled = settings.bridge_required
         self._task: asyncio.Task[None] | None = None
 
@@ -54,6 +57,7 @@ class BridgeController:
                     self.monitor,
                     self.tts_service,
                     trace_writer=self.trace_writer,
+                    active_memory_context=self.active_memory_context,
                 ),
                 name="p-brainz-bridge",
             )

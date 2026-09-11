@@ -8,6 +8,7 @@ from pbrainz.api.control_routes import (
     seed_mock_memories,
     ui_delete_memory,
     ui_memory,
+    ui_memory_active,
 )
 from pbrainz.api.models import (
     MemoryDeleteRequest,
@@ -15,6 +16,7 @@ from pbrainz.api.models import (
     MockChatSeedRequest,
     UITemplateModelAddRequest,
 )
+from pbrainz.bridge.memory_context import ActiveMemoryContextCache
 from pbrainz.config import Settings
 from pbrainz.conversation_service import ConversationService
 from pbrainz.database import SettingsDatabase
@@ -103,6 +105,9 @@ async def test_mock_chat_uses_seeded_memory_pipeline_and_browser(tmp_path) -> No
         request,
         MockChatSeedRequest(
             world_uuid="mock-world",
+            world_mode="multiplayer",
+            server_instance_id="pbrainz-mock-server",
+            server_world_generation="mock-world",
             player_uuid="mock-player",
             npc_uuid="mock-npc",
             game_day=4,
@@ -117,6 +122,9 @@ async def test_mock_chat_uses_seeded_memory_pipeline_and_browser(tmp_path) -> No
             model="fake-model",
             message="What do you remember about Riverside?",
             world_uuid="mock-world",
+            world_mode="multiplayer",
+            server_instance_id="pbrainz-mock-server",
+            server_world_generation="mock-world",
             player_uuid="mock-player",
             npc_uuid="mock-npc",
             session_id="mock-test-session",
@@ -127,9 +135,10 @@ async def test_mock_chat_uses_seeded_memory_pipeline_and_browser(tmp_path) -> No
     assert result["response_text"] == "I remember the Riverside shelter."
     assert result["retrieved_memories"]
     assert result["diagnostics"]["retrieval_needed"] is True
-    assert result["diagnostics"]["world_uuid"] == "mock-world"
+    mock_world = "mp-v1|pbrainz-mock-server|mock-world"
+    assert result["diagnostics"]["world_uuid"] == mock_world
 
-    browser = await ui_memory(request, world_uuid="mock-world", search="Riverside")
+    browser = await ui_memory(request, world_uuid=mock_world, search="Riverside")
     assert browser["total"] >= 4
     assert {item["record_kind"] for item in browser["items"]} >= {
         "memory",
@@ -141,7 +150,7 @@ async def test_mock_chat_uses_seeded_memory_pipeline_and_browser(tmp_path) -> No
     deleted = await ui_delete_memory(
         request,
         MemoryDeleteRequest(
-            world_uuid="mock-world",
+            world_uuid=mock_world,
             record_kind="memory",
             record_id="mock-memory-riverside",
             player_uuid="mock-player",
@@ -149,7 +158,33 @@ async def test_mock_chat_uses_seeded_memory_pipeline_and_browser(tmp_path) -> No
         ),
     )
     assert deleted["deleted"] is True
-    remaining = await ui_memory(request, world_uuid="mock-world", search="Riverside")
+    remaining = await ui_memory(request, world_uuid=mock_world, search="Riverside")
     assert all(
         item["record_id"] != "mock-memory-riverside" for item in remaining["items"]
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_browser_defaults_to_the_fresh_active_save(tmp_path) -> None:
+    request = _request_context(tmp_path)
+    cache = ActiveMemoryContextCache()
+    assert cache.update(
+        {
+            "world_mode": "multiplayer",
+            "server_instance_id": "server-one",
+            "server_world_generation": "wipe-one",
+            "player_uuid": "player-one",
+        },
+        "runtime-one",
+    )
+    request.app.state.active_memory_context = cache
+
+    active = await ui_memory_active(request)
+    browser = await ui_memory(request)
+
+    assert active["active"]["world_uuid"] == (
+        "mp-v1|server-one|wipe-one"
+    )
+    assert active["active"]["exists"] is False
+    assert browser["world_uuid"] == "mp-v1|server-one|wipe-one"
+    assert browser["items"] == []

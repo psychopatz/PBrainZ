@@ -16,7 +16,7 @@ from pbrainz.bridge.transport import FileBridgeTransport
 from pbrainz.config import Settings
 from pbrainz.conversation_runtime import Utterance
 from pbrainz.exceptions import ProviderError
-from pbrainz.memory import MemoryScope, SQLiteMemoryStore
+from pbrainz.memory import MemoryIdentity, MemoryScope, SQLiteMemoryStore
 from pbrainz.providers.base import CompletionResult
 from pbrainz.semantic_tool_protocol import (
     ensure_identity_intent,
@@ -27,6 +27,17 @@ from pbrainz.semantic_tool_protocol import (
     social_reply_repair_needed,
     strip_provider_scaffold,
 )
+
+
+def _test_memory_identity(world_uuid: str) -> MemoryIdentity:
+    return MemoryIdentity.from_mapping(
+        world_uuid,
+        {
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": world_uuid,
+        },
+    )
 
 
 def test_repeating_bridge_cycle_failure_is_rate_limited() -> None:
@@ -570,6 +581,9 @@ async def test_structured_bridge_delivers_authorized_semantic_tool_calls(tmp_pat
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -610,6 +624,9 @@ async def test_text_action_enters_the_same_delivery_pipeline(tmp_path) -> None:
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -632,9 +649,10 @@ async def test_text_action_enters_the_same_delivery_pipeline(tmp_path) -> None:
     assert delivery["response_text"] == "Watch your mouth."
     assert delivery["semantic_tool_calls"][0]["name"] == "social_react"
     assert delivery["semantic_tool_calls"][0]["arguments"]["kind"] == "insult"
-    stored = service._store("world-one").recent_turns(
+    identity = _test_memory_identity("world-one")
+    stored = service._store(identity).recent_turns(
         "session-one",
-        MemoryScope("world-one", "player-one", "npc-one"),
+        MemoryScope(identity.world_uuid, "player-one", "npc-one"),
         8,
     )
     assert all("<projecthoomans-action>" not in turn.content for turn in stored)
@@ -658,6 +676,9 @@ async def test_plain_name_turn_enters_the_authoritative_identity_pipeline(tmp_pa
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -706,6 +727,9 @@ async def test_name_tool_only_turn_delivers_repaired_dialogue_and_tool(tmp_path)
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -755,6 +779,9 @@ async def test_tool_only_turn_uses_shared_ack_for_delivery_and_tts(tmp_path) -> 
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -807,6 +834,9 @@ async def test_empty_provider_response_is_explained_and_not_saved_as_memory(tmp_
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -826,7 +856,7 @@ async def test_empty_provider_response_is_explained_and_not_saved_as_memory(tmp_
     assert delivery["response_text"] == ""
     assert delivery["finish_reason"] == "stop"
     assert "empty response" in delivery["error"]
-    assert service._store("world-one").stats()["turn_count"] == 1
+    assert service._store(_test_memory_identity("world-one")).stats()["turn_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -867,6 +897,9 @@ async def test_provider_error_still_delivers_bounded_insult_reaction(tmp_path) -
         "npc_id": "npc-one",
         "conversation_context": {
             "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
             "player_uuid": "player-one",
             "npc_uuid": "npc-one",
             "session_id": "session-one",
@@ -1081,6 +1114,9 @@ async def _fake_sync_game(root: Path, acknowledged: asyncio.Event) -> None:
                         {
                             "messageID": "conversation-sync:1",
                             "saveUUID": "world-sync",
+                            "worldMode": "multiplayer",
+                            "serverInstanceId": "test-server",
+                            "serverWorldGeneration": "world-sync",
                             "conversationID": "conversation-sync",
                             "playerUUID": "player-one",
                             "npcUUID": "npc-one",
@@ -1153,10 +1189,11 @@ async def test_bridge_pump_ingests_and_acknowledges_canonical_messages(tmp_path)
         game.cancel()
         await asyncio.gather(pump, game, return_exceptions=True)
 
-    store = SQLiteMemoryStore(tmp_path / "memory", "world-sync")
+    identity = _test_memory_identity("world-sync")
+    store = SQLiteMemoryStore(tmp_path / "memory", identity.world_uuid)
     turns = store.recent_turns(
         "conversation-sync",
-        MemoryScope("world-sync", "player-one", "npc-one"),
+        MemoryScope(identity.world_uuid, "player-one", "npc-one"),
     )
     assert len(turns) == 1
     assert turns[0].message_id == "conversation-sync:1"

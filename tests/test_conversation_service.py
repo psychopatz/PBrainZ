@@ -1,8 +1,12 @@
 import pytest
 
 from pbrainz.config import Settings
-from pbrainz.conversation_service import ConversationRequest, ConversationService
-from pbrainz.memory import MemoryScope
+from pbrainz.conversation_service import (
+    ConversationRequest,
+    ConversationService,
+    retrieval_needed_for,
+)
+from pbrainz.memory import MemoryIdentity, MemoryRecord, MemoryScope, MemoryType, MemoryVisibility
 from pbrainz.providers.base import CompletionResult, StreamEvent
 
 
@@ -155,6 +159,92 @@ class HordeScaffoldProviders:
         )
 
 
+def _memory_identity(world_uuid: str) -> MemoryIdentity:
+    return MemoryIdentity.from_mapping(
+        world_uuid,
+        {
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": world_uuid,
+        },
+    )
+
+
+def _conversation_request(
+    request_id: str,
+    world_uuid: str,
+    player_uuid: str,
+    npc_uuid: str,
+    session_id: str,
+    message: str,
+    **kwargs,
+) -> ConversationRequest:
+    identity = _memory_identity(world_uuid)
+    return ConversationRequest(
+        request_id=request_id,
+        scope=MemoryScope(identity.world_uuid, player_uuid, npc_uuid),
+        session_id=session_id,
+        message=message,
+        memory_identity=identity,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "When did we first meet exactly?",
+        "Do you remember our first meeting?",
+        "Have we met before?",
+    ),
+)
+def test_relationship_history_questions_enable_memory_retrieval(message: str) -> None:
+    assert retrieval_needed_for(message) is True
+
+
+@pytest.mark.asyncio
+async def test_first_meeting_memory_is_added_to_rag_context(tmp_path) -> None:
+    providers = FakeProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+        context_max_chars=8000,
+    )
+    service = ConversationService(settings, providers)
+    identity = _memory_identity("world-one")
+    scope = MemoryScope(identity.world_uuid, "player-one", "npc-one")
+    service._store(identity).remember(
+        MemoryRecord(
+            "first-meeting",
+            scope,
+            MemoryType.PERSONAL_EVENT,
+            "The player first met Alice on July 9, 1993 (Day 0, 15:39).",
+            tags=("primitive", "first_meeting"),
+            importance=0.8,
+            visibility=MemoryVisibility.PUBLIC,
+            participants=("player-one", "npc-one"),
+            entity_refs=("npc-one",),
+        )
+    )
+
+    result = await service.complete(
+        _conversation_request(
+            "first-meeting-question",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "When did we first meet exactly?",
+        )
+    )
+
+    assert result.diagnostics["retrieval_needed"] is True
+    assert result.retrieved_memories
+    assert "The player first met Alice on July 9, 1993" in (
+        providers.requests[0][1].messages[0].content or ""
+    )
+
+
 @pytest.mark.asyncio
 async def test_structured_conversation_owns_history_and_consolidates(tmp_path) -> None:
     providers = FakeProviders()
@@ -164,23 +254,26 @@ async def test_structured_conversation_owns_history_and_consolidates(tmp_path) -
         context_max_chars=4000,
     )
     service = ConversationService(settings, providers)
-    scope = MemoryScope("world-one", "player-one", "npc-one")
-    request = ConversationRequest(
-        request_id="request-one",
-        scope=scope,
-        session_id="session-one",
-        message="My name is Alex.",
+    request = _conversation_request(
+        "request-one",
+        "world-one",
+        "player-one",
+        "npc-one",
+        "session-one",
+        "My name is Alex.",
         npc_name="Harley",
         player_name="Alex",
     )
 
     first = await service.complete(request)
     second = await service.complete(
-        ConversationRequest(
-            request_id="request-two",
-            scope=scope,
-            session_id="session-one",
-            message="What do you remember about me?",
+        _conversation_request(
+            "request-two",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "What do you remember about me?",
         )
     )
 
@@ -206,11 +299,13 @@ async def test_optional_provider_stream_reconstructs_text_and_forwards_deltas(tm
         chunks.append(chunk)
 
     result = await service.complete(
-        ConversationRequest(
-            request_id="stream-request",
-            scope=MemoryScope("world-stream", "player-stream", "npc-stream"),
-            session_id="session-stream",
-            message="What happened?",
+        _conversation_request(
+            "stream-request",
+            "world-stream",
+            "player-stream",
+            "npc-stream",
+            "session-stream",
+            "What happened?",
         ),
         stream_consumer=consume,
     )
@@ -232,11 +327,13 @@ async def test_horde_request_uses_dedicated_instruct_profile(tmp_path) -> None:
     service = ConversationService(settings, providers)
 
     result = await service.complete(
-        ConversationRequest(
-            request_id="horde-request",
-            scope=MemoryScope("world-horde", "player-horde", "npc-horde"),
-            session_id="horde-session",
-            message="What's your name?",
+        _conversation_request(
+            "horde-request",
+            "world-horde",
+            "player-horde",
+            "npc-horde",
+            "horde-session",
+            "What's your name?",
             npc_name="Harley",
             player_name="Alex",
             provider="horde",
@@ -270,12 +367,15 @@ async def test_horde_prompt_scaffold_is_filtered_before_memory_write(tmp_path) -
         bridge_required=False,
     )
     service = ConversationService(settings, HordeScaffoldProviders())
-    scope = MemoryScope("world-one", "player-one", "npc-one")
-    request = ConversationRequest(
-        request_id="horde-scaffold",
-        scope=scope,
-        session_id="session-one",
-        message="dude you look terrible",
+    identity = _memory_identity("world-one")
+    scope = MemoryScope(identity.world_uuid, "player-one", "npc-one")
+    request = _conversation_request(
+        "horde-scaffold",
+        "world-one",
+        "player-one",
+        "npc-one",
+        "session-one",
+        "dude you look terrible",
         npc_name="Emilio",
         player_name="Alex",
     )
@@ -284,7 +384,7 @@ async def test_horde_prompt_scaffold_is_filtered_before_memory_write(tmp_path) -
 
     assert result.completion.text == '"Ugh, you look terrible."'
     assert result.diagnostics["provider_scaffold_filtered"] is True
-    turns = service._store("world-one").recent_turns("session-one", scope, 8)
+    turns = service._store(identity).recent_turns("session-one", scope, 8)
     assert [turn.role for turn in turns] == ["user", "assistant"]
     assert "Instruction:" not in turns[-1].content
 
@@ -297,11 +397,13 @@ async def test_empty_provider_candidate_retries_without_tools(tmp_path) -> None:
         bridge_required=False,
     )
     service = ConversationService(settings, providers)
-    request = ConversationRequest(
-        request_id="retry-one",
-        scope=MemoryScope("world-one", "player-one", "npc-one"),
-        session_id="session-one",
-        message="Where are you?",
+    request = _conversation_request(
+        "retry-one",
+        "world-one",
+        "player-one",
+        "npc-one",
+        "session-one",
+        "Where are you?",
         available_tools=(
             {
                 "type": "function",
@@ -334,11 +436,13 @@ async def test_authorized_tool_only_candidate_gets_text_repair_without_losing_to
     )
     service = ConversationService(settings, providers)
     result = await service.complete(
-        ConversationRequest(
-            request_id="repair-authorized-tool",
-            scope=MemoryScope("world-one", "player-one", "npc-one"),
-            session_id="session-one",
-            message="I admire you.",
+        _conversation_request(
+            "repair-authorized-tool",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "I admire you.",
             available_tools=(
                 {
                     "type": "function",
@@ -371,11 +475,13 @@ async def test_explicit_social_generic_reply_gets_one_contextual_repair(
     )
     service = ConversationService(settings, providers)
     result = await service.complete(
-        ConversationRequest(
-            request_id="repair-sexual-social",
-            scope=MemoryScope("world-one", "player-one", "npc-one"),
-            session_id="session-one",
-            message="I want to have sex with you.",
+        _conversation_request(
+            "repair-sexual-social",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "I want to have sex with you.",
             available_tools=(
                 {
                     "type": "function",
@@ -404,11 +510,13 @@ async def test_unrecognized_tool_candidate_retries_as_dialogue(tmp_path) -> None
         bridge_required=False,
     )
     service = ConversationService(settings, providers)
-    request = ConversationRequest(
-        request_id="retry-tool-one",
-        scope=MemoryScope("world-one", "player-one", "npc-one"),
-        session_id="session-one",
-        message="What should we do?",
+    request = _conversation_request(
+        "retry-tool-one",
+        "world-one",
+        "player-one",
+        "npc-one",
+        "session-one",
+        "What should we do?",
         available_tools=(
             {
                 "type": "function",
@@ -439,37 +547,43 @@ async def test_consolidation_runs_when_failed_turn_crosses_boundary(tmp_path) ->
         memory_consolidation_turns=4,
     )
     service = ConversationService(settings, providers)
-    scope = MemoryScope("world-one", "player-one", "npc-one")
+    identity = _memory_identity("world-one")
 
     first = await service.complete(
-        ConversationRequest(
-            request_id="boundary-one",
-            scope=scope,
-            session_id="session-one",
-            message="We should stay together.",
+        _conversation_request(
+            "boundary-one",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "We should stay together.",
         )
     )
     failed = await service.complete(
-        ConversationRequest(
-            request_id="boundary-two",
-            scope=scope,
-            session_id="session-one",
-            message="Are you still there?",
+        _conversation_request(
+            "boundary-two",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "Are you still there?",
         )
     )
     recovered = await service.complete(
-        ConversationRequest(
-            request_id="boundary-three",
-            scope=scope,
-            session_id="session-one",
-            message="What was our plan?",
+        _conversation_request(
+            "boundary-three",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "What was our plan?",
         )
     )
 
     assert first.completion.text == "The plan still stands."
     assert failed.diagnostics["empty_response"] is True
     assert recovered.diagnostics["consolidated"] is True
-    assert service._store("world-one").stats()["memory_count"] >= 1
+    assert service._store(identity).stats()["memory_count"] >= 1
 
 
 def test_conversation_sync_owns_canonical_message_identity(tmp_path) -> None:
@@ -482,6 +596,9 @@ def test_conversation_sync_owns_canonical_message_identity(tmp_path) -> None:
         "version": 1,
         "messageID": "conversation-one:2",
         "saveUUID": "world-one",
+        "worldMode": "multiplayer",
+        "serverInstanceId": "test-server",
+        "serverWorldGeneration": "world-one",
         "conversationID": "conversation-one",
         "playerUUID": "player-one",
         "npcUUID": "npc-one",
@@ -501,7 +618,8 @@ def test_conversation_sync_owns_canonical_message_identity(tmp_path) -> None:
     assert second.duplicate is True
     assert second.turn.message_id == "conversation-one:2"
     assert second.turn.game_day == 3
-    assert service._store("world-one").stats()["turn_count"] == 1
+    identity = _memory_identity("world-one")
+    assert service._store(identity).stats()["turn_count"] == 1
 
 
 def test_conversation_sync_excludes_provider_failures_but_keeps_tool_ack(tmp_path) -> None:
@@ -513,6 +631,9 @@ def test_conversation_sync_excludes_provider_failures_but_keeps_tool_ack(tmp_pat
     failure = {
         "messageID": "conversation-one:failure",
         "saveUUID": "world-one",
+        "worldMode": "multiplayer",
+        "serverInstanceId": "test-server",
+        "serverWorldGeneration": "world-one",
         "conversationID": "conversation-one",
         "playerUUID": "player-one",
         "npcUUID": "npc-one",
@@ -547,9 +668,10 @@ def test_conversation_sync_excludes_provider_failures_but_keeps_tool_ack(tmp_pat
     assert skipped.turn.message_id == failure["messageID"]
     assert recorded.skipped is False
     assert acknowledged == (failure["messageID"], tool_ack["messageID"])
-    turns = service._store("world-one").recent_turns(
+    identity = _memory_identity("world-one")
+    turns = service._store(identity).recent_turns(
         "conversation-one",
-        MemoryScope("world-one", "player-one", "npc-one"),
+        MemoryScope(identity.world_uuid, "player-one", "npc-one"),
     )
     assert [turn.content for turn in turns] == [tool_ack["text"]]
 
@@ -567,6 +689,9 @@ async def test_conversation_recall_finds_dated_turns_from_a_previous_session(tmp
         {
             "messageID": "yesterday:1",
             "saveUUID": "world-one",
+            "worldMode": "multiplayer",
+            "serverInstanceId": "test-server",
+            "serverWorldGeneration": "world-one",
             "conversationID": "yesterday",
             "playerUUID": "player-one",
             "npcUUID": "npc-one",
@@ -580,11 +705,13 @@ async def test_conversation_recall_finds_dated_turns_from_a_previous_session(tmp
     )
 
     result = await service.complete(
-        ConversationRequest(
-            request_id="today-request",
-            scope=MemoryScope("world-one", "player-one", "npc-one"),
-            session_id="today",
-            message="Do you remember the medicine?",
+        _conversation_request(
+            "today-request",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "today",
+            "Do you remember the medicine?",
         )
     )
 
@@ -604,7 +731,8 @@ async def test_conversation_builds_dated_layers_and_skips_rag_for_greeting(tmp_p
         context_max_chars=8000,
     )
     service = ConversationService(settings, providers)
-    scope = MemoryScope("world-one", "player-one", "npc-alice")
+    identity = _memory_identity("world-one")
+    scope = MemoryScope(identity.world_uuid, "player-one", "npc-alice")
     participants = (
         {"id": "player-one", "name": "Alex", "kind": "player"},
         {"id": "npc-alice", "name": "Alice", "kind": "npc"},
@@ -612,11 +740,13 @@ async def test_conversation_builds_dated_layers_and_skips_rag_for_greeting(tmp_p
     )
 
     first = await service.complete(
-        ConversationRequest(
-            request_id="layer-one",
-            scope=scope,
-            session_id="scene-one",
-            message="Hello.",
+        _conversation_request(
+            "layer-one",
+            "world-one",
+            "player-one",
+            "npc-alice",
+            "scene-one",
+            "Hello.",
             game_day=6,
             world_age_hours=145.0,
             participants=participants,
@@ -626,11 +756,13 @@ async def test_conversation_builds_dated_layers_and_skips_rag_for_greeting(tmp_p
     assert first.diagnostics["retrieval_skipped"] is True
 
     second = await service.complete(
-        ConversationRequest(
-            request_id="layer-two",
-            scope=scope,
-            session_id="scene-one",
-            message="I will check the Riverside shed tomorrow.",
+        _conversation_request(
+            "layer-two",
+            "world-one",
+            "player-one",
+            "npc-alice",
+            "scene-one",
+            "I will check the Riverside shed tomorrow.",
             game_day=6,
             world_age_hours=146.0,
             participants=participants,
@@ -642,7 +774,7 @@ async def test_conversation_builds_dated_layers_and_skips_rag_for_greeting(tmp_p
 
     assert second.diagnostics["consolidated"] is True
     assert second.diagnostics["day_synopsis_available"] is True
-    store = service._store("world-one")
+    store = service._store(identity)
     assert store.get_day_synopsis(scope, 6) is not None
     assert store.stats()["episode_count"] == 1
     assert store.stats()["fact_count"] >= 1

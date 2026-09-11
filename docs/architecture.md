@@ -11,7 +11,8 @@ Project Hoomans client
 PsychopatzCore file bridge
   -> pollChat / deliverChat / pollConversationSync / ackConversationSync
 PBrainZ bridge pump
-  -> canonical-message ingestion + ConversationService
+  -> canonical-message ingestion + typed memory-primitives ingestion
+     -> ConversationService
      -> actor-visible MemoryStore + bounded MemoryRetriever (SQLite)
      -> ContextBuilder (bounded provider messages)
         -> ToolRouter (eligibility, relevance, top-K canonical schemas)
@@ -37,7 +38,14 @@ permissions, and action schemas.
 The `conversation_context` object is a bounded adapter payload, not a second
 game state database. It contains:
 
-- `world_uuid`: `pz-save:<getCurrentSaveName()>`, stable for the save;
+- `world_uuid`: the required request world label; storage is selected from the
+  explicit fields below;
+- `world_mode`: `singleplayer` or `multiplayer`;
+- for single-player, `save_relative_path`: the exact path relative to
+  `<Zomboid>/Saves`, such as `Apocalypse/2026-09-06_10-21-49`;
+- for client-side multiplayer, `server_instance_id` and the server's stable
+  `server_world_generation` (a new generation must be emitted after a wipe or
+  reset);
 - `player_uuid`: Project Hoomans' stable `characterUUID`;
 - `npc_uuid`: the canonical Project Hoomans NPC ID;
 - `message_id`: the canonical ID used to make retries idempotent;
@@ -48,13 +56,33 @@ game state database. It contains:
 
 The Python boundary accepts both camelCase and snake_case IDs, but requires all
 three scope IDs and the current message for structured NPC dialogue. Direct
-`messages` bridge requests do not use NPC memory.
+`messages` bridge requests do not use NPC memory. Project Hoomans should send
+the save/server identity on the first request after the world opens and on any
+world transition; PBrainZ deliberately does not guess the active save by
+scanning for the newest directory. The bridge adapter can derive the
+single-player locator from Project Zomboid's current-save and save-directory
+Lua APIs and include it on each structured request.
 
 ## Memory schema and isolation
 
-Each world has one SQLite file. The filename is derived from a SHA-256 prefix of
-the world UUID; the complete UUID is recorded in `world_metadata` and checked
-when the store opens. The schema intentionally uses shared tables:
+Each logical world has one SQLite file. The filename is derived from a SHA-256
+prefix of the canonical identity; the complete identity is recorded in
+`world_metadata` and checked when the store opens. The schema intentionally
+uses shared tables:
+
+- In single-player, the canonical identity is `sp-v1|<save-relative-path>`
+  and the database is under the exact save folder:
+  `<Zomboid>/Saves/<mode>/<save>/PBrainZ/memory/`.
+- In client-side multiplayer, the canonical identity is
+  `mp-v1|<server-instance-id>|<server-world-generation>` and the database
+  remains in PBrainZ's external memory root. A server reset must create a new
+  generation; a server name alone is not a safe identity.
+- An explicit `memory_root` setting remains an intentional override for
+  portable/test/custom deployments.
+The save-local directory is separate from Project Zomboid's own binary files,
+so SQLite WAL/shm files cannot corrupt `map.bin`, `players.db`, or other save
+artifacts. Removing the save folder removes its PBrainZ memory as ordinary
+contents of that folder. PBrainZ never deletes a save folder itself.
 
 | Table | Purpose |
 | --- | --- |
@@ -67,6 +95,7 @@ when the store opens. The schema intentionally uses shared tables:
 | `day_synopses` | Compact per-NPC, per-game-day developments and structured lists |
 | `structured_facts` | Commitments, plans, claims, and other typed statements with truth status |
 | `memory_fts` | Optional FTS5 index over active memories |
+| `memory_entities` | Per-world NPC/player display-name projection for UI browsing |
 
 Every session, turn, memory, episode, fact, and commitment carries `world_uuid`,
 `player_uuid`, and `npc_uuid`. Provenance records source, session, and turn
@@ -109,6 +138,16 @@ the player and provider rows immediately so the next request has low latency;
 the later canonical outbox delivery is collapsed by `message_id`, so it does
 not create a second copy.
 
+Typed gameplay memory primitives use the same bridge poll/ack channel but a
+separate bounded client outbox. Project Hoomans supplies only a primitive type,
+stable player/NPC IDs, authoritative source metadata, and a structured event
+time. PBrainZ validates the identity and date, renders deterministic memory
+content, and assigns an idempotent key. The current primitives are
+`first_meeting` and `pre_outbreak_relationship`; new primitive renderers can be
+registered without changing the bridge protocol. The game calendar is emitted
+as numeric year/month/day/hour/minute fields plus `game_day` and
+`world_age_hours`, with an ISO value and human label for inspection.
+
 The default consolidator creates a compact summary and extracts only clear
 identity facts, preferences, and commitments. `MemoryStore`,
 `MemoryRetriever`, `ContextBuilder`, and `ConversationConsolidator` are
@@ -135,20 +174,23 @@ registered behind the same boundary.
 
 ## Single-player and multiplayer
 
-In single-player the local client publishes the pending conversation through
-the local PsychopatzCore bridge and PBrainZ returns the response. In
-multiplayer, the client still supplies only its scoped context and semantic
-request. PBrainZ has no authority to mutate server state; any order must
-travel through Project Hoomans' normal server-validated command path. Stable
-player character IDs keep separate players' memory scopes isolated.
+In single-player the local client publishes the pending conversation and typed
+memory primitives through the local PsychopatzCore bridge and PBrainZ returns
+the response. In multiplayer, the client still supplies only its scoped
+context and semantic request; server-authoritative lifelong relationships are
+projected to the client as primitives, never written by PBrainZ to server
+state. PBrainZ has no authority to mutate server state; any order must travel
+through Project Hoomans' normal server-validated command path. Stable player
+character IDs keep separate players' memory scopes isolated.
 
 ## Failure containment and performance
 
 - The bridge is runtime-ID checked and remains bounded by the existing slot
   protocol.
-- The game keeps one save-scoped outbox rather than per-NPC transcript tables;
-  it holds at most 256 pending messages, sends at most four per poll, and
-  removes entries only after pbrainz acknowledges them.
+- The game keeps bounded save-scoped message and primitive outboxes rather than
+  per-NPC transcript tables; each holds at most 256 pending records, sends at
+  most four messages/eight primitives per acknowledgement window, and removes
+  entries only after pbrainz acknowledges their canonical IDs.
 - Memory stores are opened lazily per world, use one connection per operation,
   WAL mode, and do not perform network work during application startup.
 - Model catalogs remain independent per provider and are refreshed only on the
@@ -165,9 +207,11 @@ player character IDs keep separate players' memory scopes isolated.
 ## Testing and future hooks
 
 Python tests cover save/pair isolation, shared schema, FTS fallback behavior,
-context budgeting, service consolidation, bridge request handling, and
-semantic tool allow-listing. Project Hoomans has a Lua smoke test for stable
-save/player/NPC identity, compact context, and tool construction.
+context budgeting, service consolidation, bridge request handling, active-save
+selection, typed primitive persistence, and semantic tool allow-listing.
+Project Hoomans has Lua smoke tests for stable save/player/NPC identity,
+compact context, typed memory primitive enqueue/ack behavior, and tool
+construction.
 
 Future work can add a provider-backed memory extractor, embeddings or a vector
 retriever, dynamic Tool RAG, richer authoritative SocialEvent commands,
@@ -178,20 +222,26 @@ orders without changing the current ownership boundary.
 
 Project Hoomans keeps only the current game day's compact UI history per
 player/NPC thread. That cache is allowed to rotate at day rollover because it
-is presentation state, not the authoritative transcript. The sync outbox is
-not cleared at rollover: unacknowledged messages remain until pbrainz stores
-them. PBrainZ retains the full dated turn rows, one compact episode per
+is presentation state, not the authoritative transcript. The sync outboxes are
+not cleared at rollover: unacknowledged messages and typed primitives remain
+until pbrainz stores them. PBrainZ retains the full dated turn rows, one compact episode per
 consolidation boundary, per-NPC day synopses, and typed conversational facts.
 It can recall relevant older turns/episodes across sessions, but does not
-inject an entire previous day's transcript into a normal prompt. No new data
-is serialized into NPC ModData beyond the existing bounded canonical-message
-outbox.
+inject an entire previous day's transcript into a normal prompt. The bounded
+client primitive outbox is also serialized in the same client-side save-scoped
+ModData pattern; it contains IDs, event types, provenance, and calendar
+fields—not provider credentials or generated prose.
 
 ## Native memory inspection and mock chat
 
-The control panel's `Memories` tab enumerates existing world databases and
-shows a bounded, searchable union of active summaries, episodes, structured
-facts, and day synopses. It deliberately does not dump raw conversation turns.
+The control panel's `Memories` tab asks the running game for its fresh active
+world identity, labels that world as `CURRENT`, and selects it by default. A
+manual combobox selection and an `Auto-select current` action remain available.
+It enumerates existing world databases and shows a bounded, searchable union
+of active summaries, episodes, structured facts, and day synopses. Known NPC
+names are projected from per-world entity metadata; UUIDs remain visible in
+the detail view for diagnostics. The tab deliberately does not dump raw
+conversation turns.
 Deletion requires an explicit record selection and confirmation, then removes
 only that record inside the selected world database; commitment indexes are
 removed with their parent memory.

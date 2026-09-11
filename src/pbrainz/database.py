@@ -16,10 +16,6 @@ from pbrainz.branding import DATABASE_ENV, DATABASE_NAME, PORTABLE_ROOT_ENV
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DATABASE_NAME = DATABASE_NAME
-LEGACY_DATABASE_NAME = "hoomansllm.db"
-LEGACY_DATABASE_ENV = "HOOMANSLLM_DB"
-LEGACY_PORTABLE_ROOT_ENV = "HOOMANSLLM_PORTABLE_ROOT"
-LEGACY_MIGRATION_KEY = "_legacy_database_migrated"
 DEFAULT_ACTIVITY_LIMIT = 50
 MAX_ACTIVITY_LIMIT = 500
 DEFAULT_TRACE_LIMIT = 100
@@ -87,7 +83,6 @@ PERSISTED_SETTINGS = (
     "tts_synthesis_timeout",
     "tts_audio_buffer_ms",
     "tts_voice_presets_json",
-    LEGACY_MIGRATION_KEY,
 )
 
 
@@ -156,57 +151,6 @@ class SettingsDatabase:
                 LOGGER.warning(
                     "Could not restrict database permissions for %s: %s", self.path, error
                 )
-
-    def import_legacy_if_needed(self, candidates: Iterable[str | Path]) -> bool:
-        """Merge settings/catalogs from a pre-rename database once.
-
-        The HoomansLLM-to-PBrainZ rename changed the database filename. Do not
-        delete or replace either database: preserve values already saved in the
-        canonical PBrainZ database and only fill missing values from a legacy
-        source. This is deliberately limited to the default database flow;
-        callers using ``PBRAINZ_DB`` remain fully authoritative.
-        """
-
-        target_settings = self.load_settings()
-        if target_settings.get(LEGACY_MIGRATION_KEY):
-            return False
-
-        for candidate in candidates:
-            source = Path(candidate).expanduser()
-            try:
-                if not source.is_file() or source.resolve() == self.path.resolve():
-                    continue
-            except OSError:
-                continue
-
-            try:
-                with sqlite3.connect(source) as connection:
-                    connection.row_factory = sqlite3.Row
-                    source_settings = {
-                        row["key"]: _decode_value(row["value"])
-                        for row in connection.execute("SELECT key, value FROM settings")
-                    }
-                    catalog_rows = connection.execute(
-                        "SELECT provider, model_id FROM model_catalog ORDER BY provider, model_id"
-                    ).fetchall()
-            except (OSError, sqlite3.Error, KeyError, TypeError, json.JSONDecodeError) as error:
-                LOGGER.warning("Could not inspect legacy database %s: %s", source, error)
-                continue
-
-            merged = _merge_legacy_settings(target_settings, source_settings)
-            if merged:
-                self.save_settings(merged)
-
-            models_by_provider: dict[str, list[str]] = {}
-            for row in catalog_rows:
-                models_by_provider.setdefault(row["provider"], []).append(row["model_id"])
-            for provider, model_ids in models_by_provider.items():
-                if not self.model_catalog(provider):
-                    self.replace_model_catalog(provider, model_ids, source="legacy_database")
-
-            self.save_settings({LEGACY_MIGRATION_KEY: str(source.resolve())})
-            return bool(merged or catalog_rows)
-        return False
 
     def load_settings(self) -> dict[str, Any]:
         connection = self._connect()
@@ -445,34 +389,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _decode_value(value: object) -> Any:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value
-    return value
-
-
-def _merge_legacy_settings(
-    target: Mapping[str, Any], source: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Return only legacy values that do not overwrite useful current values."""
-
-    merged: dict[str, Any] = {}
-    for key, value in source.items():
-        if key not in PERSISTED_SETTINGS or key in {"app_name", LEGACY_MIGRATION_KEY}:
-            continue
-        current = target.get(key)
-        if _is_blank(current) and not _is_blank(value):
-            merged[key] = value
-    return merged
-
-
-def _is_blank(value: object) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
-
-
 def _json_safe(value: object, depth: int = 0) -> object:
     """Make arbitrary provider/game diagnostics bounded and JSON-compatible."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -515,34 +431,3 @@ def application_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd()
-
-
-def legacy_database_candidates() -> tuple[Path, ...]:
-    """Return old database locations that can be migrated into this install."""
-
-    candidates: list[Path] = []
-    configured_database = os.getenv(LEGACY_DATABASE_ENV)
-    if configured_database and configured_database.strip():
-        candidates.append(Path(configured_database).expanduser())
-
-    configured_root = os.getenv(LEGACY_PORTABLE_ROOT_ENV)
-    if configured_root and configured_root.strip():
-        legacy_root = Path(configured_root).expanduser()
-        candidates.extend(
-            (legacy_root / "data" / LEGACY_DATABASE_NAME, legacy_root / LEGACY_DATABASE_NAME)
-        )
-
-    root = application_root()
-    candidates.extend((root / "data" / LEGACY_DATABASE_NAME, root / LEGACY_DATABASE_NAME))
-
-    # Releases before portable data directories used this XDG location on
-    # Linux. Keep it as a read-only migration source for existing installs.
-    xdg_config = os.getenv("XDG_CONFIG_HOME")
-    xdg_root = (
-        Path(xdg_config).expanduser()
-        if xdg_config and xdg_config.strip()
-        else Path.home() / ".config"
-    )
-    candidates.append(xdg_root / "HoomansLLM" / LEGACY_DATABASE_NAME)
-
-    return tuple(dict.fromkeys(path.expanduser() for path in candidates))

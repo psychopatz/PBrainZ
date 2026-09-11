@@ -83,6 +83,10 @@ class MockChatRequest(BaseModel):
     model: str = Field(default="default", min_length=1)
     message: str = Field(min_length=1, max_length=12000)
     world_uuid: str = Field(default="pbrainz-mock-world", min_length=1, max_length=256)
+    world_mode: str = Field(min_length=1, max_length=32)
+    save_relative_path: str | None = Field(default=None, max_length=512)
+    server_instance_id: str | None = Field(default=None, max_length=512)
+    server_world_generation: str | None = Field(default=None, max_length=512)
     player_uuid: str = Field(default="mock-player", min_length=1, max_length=256)
     npc_uuid: str = Field(default="mock-npc", min_length=1, max_length=256)
     session_id: str | None = Field(default=None, max_length=256)
@@ -119,6 +123,10 @@ class MockChatSeedRequest(BaseModel):
     """Identity fields for the panel's deterministic mock-memory fixture."""
 
     world_uuid: str = Field(default="pbrainz-mock-world", min_length=1, max_length=256)
+    world_mode: str = Field(min_length=1, max_length=32)
+    save_relative_path: str | None = Field(default=None, max_length=512)
+    server_instance_id: str | None = Field(default=None, max_length=512)
+    server_world_generation: str | None = Field(default=None, max_length=512)
     player_uuid: str = Field(default="mock-player", min_length=1, max_length=256)
     npc_uuid: str = Field(default="mock-npc", min_length=1, max_length=256)
     game_day: int = Field(default=1, ge=0)

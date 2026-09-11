@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pbrainz.api.routes import router
 from pbrainz.branding import PRODUCT_NAME, PRODUCT_VERSION
 from pbrainz.bridge import BridgeController, BridgeRuntimeMonitor
+from pbrainz.bridge.memory_context import ActiveMemoryContextCache
 from pbrainz.config import Settings, get_settings
 from pbrainz.conversation_service import ConversationService
 from pbrainz.database import SettingsDatabase
@@ -67,6 +68,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app_settings, providers, trace_writer=database.add_llm_trace
         )
         app.state.bridge = bridge
+        app.state.active_memory_context = ActiveMemoryContextCache(
+            ttl_seconds=max(2.0, app_settings.bridge_poll_interval * 5)
+        )
         app.state.game_bridge_settings = game_bridge_settings
         catalog = ModelCatalogManager(app_settings, providers, database)
         app.state.model_catalog = catalog
@@ -90,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             bridge,
             tts,
             trace_writer=database.add_llm_trace,
+            active_memory_context=app.state.active_memory_context,
         )
         app.state.bridge_controller = controller
         app.state.bridge_pump = None

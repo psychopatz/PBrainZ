@@ -3,6 +3,7 @@
 from .catalog import ToolCatalog, ToolCatalogCache, hydrate_request
 from .client import BridgeClient
 from .controller import BridgeController
+from .memory_context import ActiveMemoryContext, ActiveMemoryContextCache
 from .protocol import (
     CORE_NAMESPACE,
     MAX_REQUEST_BYTES,
@@ -40,6 +41,8 @@ __all__ = [
     "BridgeClientError",
     "BridgeCommandError",
     "BridgeController",
+    "ActiveMemoryContext",
+    "ActiveMemoryContextCache",
     "BridgeRequest",
     "BridgeResponse",
     "BridgeRuntimeMonitor",

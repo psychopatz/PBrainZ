@@ -40,6 +40,123 @@ class UtteranceState(StrEnum):
     FAILED = "FAILED"
 
 
+_AUDIO_EFFECT_PROFILE_ALIASES = {
+    "": "none",
+    "none": "none",
+    "off": "none",
+    "walkie_talkie": "radio",
+    "walkie-talkie": "radio",
+    "walkietalkie": "radio",
+    "radio": "radio",
+    "telephone": "telephone",
+    "phone": "telephone",
+    "intercom": "telephone",
+    "muffled": "muffled",
+    "underwater": "underwater",
+    "under_water": "underwater",
+}
+_AUDIO_ENVIRONMENT_ALIASES = {
+    "": "normal",
+    "normal": "normal",
+    "clear": "normal",
+    "underwater": "underwater",
+    "under_water": "underwater",
+    "water": "underwater",
+    "muffled": "muffled",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AudioPresentation:
+    """Bounded per-utterance audio context selected by the game-side adapter."""
+
+    effect_profile: str = "none"
+    environment: str = "normal"
+    intensity: float = 1.0
+
+    def __post_init__(self) -> None:
+        profile = str(self.effect_profile or "none").strip().lower().replace(" ", "_")
+        environment = str(self.environment or "normal").strip().lower().replace(" ", "_")
+        object.__setattr__(
+            self,
+            "effect_profile",
+            _AUDIO_EFFECT_PROFILE_ALIASES.get(profile, "none"),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _AUDIO_ENVIRONMENT_ALIASES.get(environment, "normal"),
+        )
+        try:
+            intensity = float(self.intensity)
+        except (TypeError, ValueError, OverflowError):
+            intensity = 1.0
+        object.__setattr__(self, "intensity", max(0.0, min(1.0, intensity)))
+
+    @classmethod
+    def from_mapping(cls, value: object) -> AudioPresentation:
+        """Read the compact audio contract while ignoring unknown fields."""
+
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, dict):
+            return cls()
+        source = value
+        for key in (
+            "audio_presentation",
+            "audioPresentation",
+            "audio_context",
+            "audioContext",
+            "audio",
+        ):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                source = nested
+                break
+
+        def first(*keys: str, default: object) -> object:
+            for key in keys:
+                if source.get(key) is not None:
+                    return source[key]
+            return default
+
+        return cls(
+            effect_profile=first(
+                "effect_profile",
+                "effectProfile",
+                "audio_effect_profile",
+                "audioEffectProfile",
+                "profile",
+                default="none",
+            ),
+            environment=first(
+                "environment",
+                "audio_environment",
+                "audioEnvironment",
+                default="normal",
+            ),
+            intensity=first(
+                "intensity",
+                "effect_intensity",
+                "effectIntensity",
+                default=1.0,
+            ),
+        )
+
+    @property
+    def requires_processing(self) -> bool:
+        return self.intensity > 0 and (
+            self.effect_profile != "none" or self.environment != "normal"
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "effect_profile": self.effect_profile,
+            "environment": self.environment,
+            "intensity": self.intensity,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceBinding:
     """Compact speaker voice identity resolved by the game-side Lua adapter.
@@ -179,6 +296,7 @@ class Utterance:
     allow_overlap: bool = False
     can_interrupt: bool = False
     voice_binding: VoiceBinding | None = None
+    audio_presentation: AudioPresentation = field(default_factory=AudioPresentation)
     generation_state: UtteranceState = UtteranceState.GENERATED
     tts_state: UtteranceState = UtteranceState.GENERATED
     playback_state: UtteranceState = UtteranceState.GENERATED
@@ -191,6 +309,7 @@ class Utterance:
         self.speaker_npc_uuid = str(self.speaker_npc_uuid).strip()[:256]
         self.speaker_kind = str(self.speaker_kind or "npc").strip().lower() or "npc"
         self.text = str(self.text or "").strip()[:12000]
+        self.audio_presentation = AudioPresentation.from_mapping(self.audio_presentation)
         if not self.utterance_id or not self.conversation_id or not self.speaker_npc_uuid:
             raise ValueError("utterance identity is required")
         if not self.text:

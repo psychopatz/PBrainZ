@@ -13,6 +13,7 @@ from pbrainz.config import Settings
 
 from ..conversation_runtime import ConversationRuntime, Utterance, UtteranceState
 from .audio import AudioOutput, PiperProvider
+from .effects import AudioEffectProcessor
 from .models import (
     FailureCallback,
     SpeechCallback,
@@ -40,6 +41,7 @@ class SynthesisQueue:
         self.worker_count = max(1, min(int(workers), 4))
         self.queue: asyncio.Queue[Utterance] = asyncio.Queue(maxsize=max(1, int(capacity)))
         self.on_result = on_result
+        self.effects = AudioEffectProcessor()
         self._tasks: list[asyncio.Task[None]] = []
         self._executor: ThreadPoolExecutor | None = None
         self.active_workers = 0
@@ -88,10 +90,7 @@ class SynthesisQueue:
                 if self._executor is None:
                     raise TTSException("synthesis executor is not running")
                 audio = await loop.run_in_executor(
-                    self._executor,
-                    self.provider.synthesize,
-                    utterance.text,
-                    utterance.voice_binding,
+                    self._executor, self._synthesize_utterance, utterance
                 )
                 await self.on_result(utterance, audio, None)
             except asyncio.CancelledError:
@@ -101,6 +100,17 @@ class SynthesisQueue:
             finally:
                 self.active_workers -= 1
                 self.queue.task_done()
+
+    def _synthesize_utterance(self, utterance: Utterance) -> SynthesizedAudio:
+        audio = self.provider.synthesize(utterance.text, utterance.voice_binding)
+        try:
+            processed = self.effects.process_wav(audio, utterance.audio_presentation)
+            if processed.path != audio.path:
+                audio.path.unlink(missing_ok=True)
+            return processed
+        except Exception:
+            audio.path.unlink(missing_ok=True)
+            raise
 
 
 class SpeechScheduler:
@@ -121,6 +131,7 @@ class SpeechScheduler:
         self._loop_task: asyncio.Task[None] | None = None
         self._audio: dict[str, SynthesizedAudio] = {}
         self._streaming_ids: set[str] = set()
+        self.effects = AudioEffectProcessor()
         self._playback_semaphore = asyncio.Semaphore(
             max(1, min(settings.tts_max_simultaneous_playback, 8))
         )
@@ -375,6 +386,13 @@ class SpeechScheduler:
         )
         producer: asyncio.Task[None] | None = None
         process: asyncio.subprocess.Process | None = None
+        effect_stream = self.effects.stream(utterance.audio_presentation)
+
+        async def process_chunk(chunk: SynthesizedAudioChunk) -> SynthesizedAudioChunk:
+            if not utterance.audio_presentation.requires_processing:
+                return chunk
+            return await asyncio.to_thread(effect_stream.process, chunk)
+
         stream_started_at = time.perf_counter()
         try:
             stream_factory = getattr(self.provider, "stream_synthesize", None)
@@ -395,7 +413,7 @@ class SpeechScheduler:
                     raise error
                 if chunk is None:
                     break
-                buffered.append(chunk)
+                buffered.append(await process_chunk(chunk))
                 buffered_ms += chunk.duration_ms
             if not buffered:
                 raise TTSException("streaming TTS produced no audio")
@@ -432,7 +450,8 @@ class SpeechScheduler:
                     if chunk is None:
                         break
                     self._validate_stream_format(chunk, first)
-                    await self._write_stream_chunks(process, [chunk], first)
+                    processed = await process_chunk(chunk)
+                    await self._write_stream_chunks(process, [processed], first)
                 await self._close_stream_input(process)
                 returncode = await process.wait()
                 player_detail = await self._read_player_stderr(process)

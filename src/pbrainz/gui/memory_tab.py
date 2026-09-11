@@ -22,12 +22,17 @@ class MemoryTab:
         self._request = request
         self._get_timeout = get_timeout
         self._world = tk.StringVar(parent)
+        self._selected_source = tk.StringVar(parent, value="No save/world selected")
         self._search = tk.StringVar(parent)
         self._kind = tk.StringVar(parent, value="all")
         self._status = tk.StringVar(parent, value="No memory world selected")
+        self._active_world_uuid = ""
+        self._active_context: dict[str, Any] = {}
         self._worlds: dict[str, dict[str, Any]] = {}
+        self._world_labels: dict[str, str] = {}
         self._records: dict[str, dict[str, Any]] = {}
         self._world_request_in_flight = False
+        self._active_request_in_flight = False
         self._records_request_in_flight = False
         self._build(parent)
 
@@ -39,14 +44,19 @@ class MemoryTab:
         controls = ttk.LabelFrame(parent, text="Saved memory browser", padding=10)
         controls.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
         controls.columnconfigure(1, weight=1)
-        controls.columnconfigure(5, weight=1)
+        controls.columnconfigure(6, weight=1)
         ttk.Label(controls, text="Save/world").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self._world_box = ttk.Combobox(
             controls, textvariable=self._world, state="readonly", width=28
         )
         self._world_box.grid(row=0, column=1, sticky="ew")
         self._world_box.bind("<<ComboboxSelected>>", self._world_changed)
-        ttk.Label(controls, text="Layer").grid(row=0, column=2, sticky="w", padx=(16, 8))
+        ttk.Button(
+            controls,
+            text="Auto-select current",
+            command=self.auto_select_current,
+        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Label(controls, text="Layer").grid(row=0, column=3, sticky="w", padx=(16, 8))
         self._kind_box = ttk.Combobox(
             controls,
             textvariable=self._kind,
@@ -54,20 +64,29 @@ class MemoryTab:
             width=16,
             values=("all", "memory", "episode", "fact", "day_synopsis"),
         )
-        self._kind_box.grid(row=0, column=3, sticky="w")
+        self._kind_box.grid(row=0, column=4, sticky="w")
         self._kind_box.bind("<<ComboboxSelected>>", self._filter_changed)
-        ttk.Label(controls, text="Search").grid(row=0, column=4, sticky="e", padx=(16, 8))
+        ttk.Label(controls, text="Search").grid(row=0, column=5, sticky="e", padx=(16, 8))
         search_box = ttk.Entry(controls, textvariable=self._search)
-        search_box.grid(row=0, column=5, sticky="ew")
+        search_box.grid(row=0, column=6, sticky="ew")
         search_box.bind("<Return>", self._search_submitted)
         ttk.Button(controls, text="Search", command=self.load_records).grid(
-            row=0, column=6, padx=(8, 0)
-        )
-        ttk.Button(controls, text="Refresh", command=self.refresh).grid(
             row=0, column=7, padx=(8, 0)
         )
+        ttk.Button(controls, text="Refresh", command=self.refresh).grid(
+            row=0, column=8, padx=(8, 0)
+        )
+        ttk.Label(controls, text="Selected source").grid(
+            row=1, column=0, sticky="nw", padx=(0, 8), pady=(8, 0)
+        )
+        ttk.Label(
+            controls,
+            textvariable=self._selected_source,
+            font=("TkDefaultFont", 10, "bold"),
+            justify="left",
+        ).grid(row=1, column=1, columnspan=8, sticky="ew", pady=(8, 0))
         ttk.Label(controls, textvariable=self._status).grid(
-            row=1, column=0, columnspan=8, sticky="w", pady=(8, 0)
+            row=2, column=0, columnspan=9, sticky="w", pady=(8, 0)
         )
 
         table_frame = ttk.Frame(parent)
@@ -150,15 +169,80 @@ class MemoryTab:
             timeout=self._get_timeout(),
         )
 
+    def auto_select_current(self) -> None:
+        """Ask the running game for its current save and select it."""
+
+        self._request_active(auto_select=True)
+
+    def _request_active(self, *, auto_select: bool) -> None:
+        if self._active_request_in_flight:
+            return
+        self._active_request_in_flight = True
+        if auto_select:
+            self._status.set("Detecting the current game save…")
+        self._request(
+            "GET",
+            "/api/memory/active",
+            None,
+            lambda data: self._active_loaded(data, auto_select=auto_select),
+            failure=self._request_failed,
+            timeout=self._get_timeout(),
+        )
+
     def _worlds_loaded(self, data: dict[str, Any]) -> None:
         self._world_request_in_flight = False
         worlds = [item for item in data.get("worlds", []) if item.get("world_uuid")]
         self._worlds = {str(item["world_uuid"]): item for item in worlds}
-        values = list(self._worlds)
-        self._world_box["values"] = values
-        if self._world.get() not in self._worlds:
-            self._world.set(values[0] if values else "")
+        self._apply_world_values()
+        self._request_active(auto_select=True)
+
+    def _active_loaded(self, data: dict[str, Any], *, auto_select: bool) -> None:
+        self._active_request_in_flight = False
+        active = data.get("active") if isinstance(data, dict) else None
+        self._active_context = active if isinstance(active, dict) else {}
+        active_uuid = ""
+        if self._active_context.get("status") == "active":
+            active_uuid = str(self._active_context.get("world_uuid") or "")
+        self._active_world_uuid = active_uuid
+        for item in self._worlds.values():
+            item["is_active"] = False
+        if active_uuid:
+            if active_uuid not in self._worlds:
+                self._worlds[active_uuid] = {
+                    **self._active_context,
+                    "world_uuid": active_uuid,
+                    "memory_count": 0,
+                    "session_count": 0,
+                    "turn_count": 0,
+                    "episode_count": 0,
+                    "fact_count": 0,
+                    "is_active": True,
+                }
+            else:
+                self._worlds[active_uuid]["is_active"] = True
+        self._apply_world_values()
+        selected_world_uuid = self._selected_world_uuid()
+        if auto_select and active_uuid:
+            selected_world_uuid = active_uuid
+        elif selected_world_uuid not in self._worlds:
+            selected_world_uuid = next(iter(self._worlds), "")
+        self._world.set(self._world_labels.get(selected_world_uuid, ""))
+        self._update_selected_source(selected_world_uuid)
+        if active_uuid:
+            self._status.set(
+                "Current game save detected. Select another save manually when needed."
+            )
+        elif self._worlds:
+            self._status.set("Current game save unavailable; manual selection remains available.")
+        else:
+            self._status.set("No saved memory worlds found")
         self.load_records()
+
+    def _apply_world_values(self) -> None:
+        self._world_labels = self._build_world_labels(list(self._worlds.values()))
+        self._world_box["values"] = [
+            self._world_labels[world_uuid] for world_uuid in self._worlds
+        ]
 
     def _world_changed(self, _event: object | None = None) -> None:
         self.load_records()
@@ -173,7 +257,7 @@ class MemoryTab:
     def load_records(self) -> None:
         if self._records_request_in_flight:
             return
-        world_uuid = self._world.get().strip()
+        world_uuid = self._selected_world_uuid()
         if not world_uuid:
             self._clear_records("No saved memory worlds found")
             return
@@ -206,14 +290,16 @@ class MemoryTab:
                     record.get("record_kind", ""),
                     record.get("record_type", ""),
                     record.get("game_day") if record.get("game_day") is not None else "—",
-                    record.get("npc_uuid", ""),
+                    record.get("npc_name")
+                    or _short_entity_id(record.get("npc_uuid", "")),
                     record.get("visibility", ""),
                     f"{float(record.get('importance', 0)):.2f}",
                     record.get("preview", ""),
                 ),
             )
         total = int(data.get("total", len(data.get("items", []))))
-        world_info = self._worlds.get(self._world.get(), {})
+        world_uuid = self._selected_world_uuid()
+        world_info = self._worlds.get(world_uuid, {})
         raw_turns = int(world_info.get("turn_count") or 0)
         sessions = int(world_info.get("session_count") or 0)
         status = (
@@ -231,12 +317,17 @@ class MemoryTab:
         if record is None:
             self._clear_detail()
             return
+        world_uuid = str(record.get("world_uuid") or "")
+        world_info = self._worlds.get(world_uuid, {})
         lines = [
+            f"Memory source: {self._world_labels.get(world_uuid, world_uuid)}",
+            f"Storage: {_storage_label(world_info)}",
             f"Layer: {record.get('record_kind', '')}",
             f"Type: {record.get('record_type', '')}",
             f"World: {record.get('world_uuid', '')}",
             f"Player: {record.get('player_uuid', '')}",
-            f"NPC: {record.get('npc_uuid', '')}",
+            f"NPC: {record.get('npc_name') or 'Unknown NPC'}",
+            f"NPC ID: {record.get('npc_uuid', '')}",
             f"Game day: {record.get('game_day') if record.get('game_day') is not None else '—'}",
             f"Visibility: {record.get('visibility', '')}",
             f"Importance: {float(record.get('importance', 0)):.2f}",
@@ -246,6 +337,10 @@ class MemoryTab:
             "",
             record.get("content", ""),
         ]
+        event_time = record.get("event_time")
+        if isinstance(event_time, dict):
+            event_label = event_time.get("label") or event_time.get("iso") or "—"
+            lines.insert(10, f"Event time: {event_label}")
         self._detail.configure(state="normal")
         self._detail.delete("1.0", "end")
         self._detail.insert("1.0", "\n".join(str(line) for line in lines))
@@ -288,6 +383,7 @@ class MemoryTab:
             self._tree.delete(*children)
         self._records = {}
         self._status.set(status)
+        self._update_selected_source(self._selected_world_uuid())
         self._clear_detail()
 
     def _clear_detail(self) -> None:
@@ -298,11 +394,76 @@ class MemoryTab:
 
     def _request_failed(self, error: Exception) -> None:
         self._world_request_in_flight = False
+        self._active_request_in_flight = False
         self._records_request_in_flight = False
         self._status.set(f"Memory request failed: {error}")
+
+    def _selected_world_uuid(self) -> str:
+        selected = self._world.get().strip()
+        if selected in self._worlds:
+            return selected
+        for world_uuid, label in self._world_labels.items():
+            if label == selected:
+                return world_uuid
+        return ""
+
+    def _update_selected_source(self, world_uuid: str) -> None:
+        world = self._worlds.get(world_uuid)
+        if not world:
+            self._selected_source.set("No save/world selected")
+            return
+        label = self._world_labels.get(world_uuid, world_uuid)
+        current = "CURRENT SAVE · " if world_uuid == self._active_world_uuid else ""
+        storage = _storage_label(world)
+        records = int(world.get("memory_count") or 0)
+        turns = int(world.get("turn_count") or 0)
+        self._selected_source.set(
+            f"{current}{label}\n{storage} · {records} durable layer record(s) · "
+            f"{turns} raw transcript turn(s)"
+        )
+
+    @staticmethod
+    def _build_world_labels(worlds: list[dict[str, Any]]) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        used: set[str] = set()
+        for world in worlds:
+            world_uuid = str(world["world_uuid"])
+            base = _world_label(world)
+            if world.get("is_active"):
+                base = f"CURRENT · {base}"
+            label = base
+            suffix = 2
+            while label in used:
+                label = f"{base} ({suffix})"
+                suffix += 1
+            labels[world_uuid] = label
+            used.add(label)
+        return labels
 
 
 def _quote(value: object) -> str:
     from urllib.parse import quote
 
     return quote(str(value or ""), safe="")
+
+
+def _world_label(world: dict[str, Any]) -> str:
+    save_path = str(world.get("save_relative_path") or "").strip()
+    if save_path:
+        return f"Save: {save_path}"
+    if world.get("storage_kind") == "external":
+        return "Multiplayer client memory"
+    return f"World: {str(world.get('world_uuid') or 'unknown')[:72]}"
+
+
+def _storage_label(world: dict[str, Any]) -> str:
+    if world.get("storage_kind") == "save_local":
+        return "Stored inside the selected save"
+    if world.get("storage_kind") == "external":
+        return "Stored in PBrainZ client storage (multiplayer)"
+    return "Storage location unavailable"
+
+
+def _short_entity_id(value: object) -> str:
+    text = str(value or "")
+    return f"Unknown NPC · {text[:8]}" if text else "Unknown NPC"
