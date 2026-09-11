@@ -31,6 +31,8 @@ from pbrainz.memory import (
 )
 from pbrainz.providers.base import CompletionResult
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.retrieval_dictionary import load_retrieval_dictionary
+from pbrainz.retrieval_planner import plan_retrieval
 from pbrainz.semantic_tool_protocol import (
     ensure_identity_intent,
     ensure_social_intent,
@@ -48,6 +50,12 @@ from pbrainz.template_profiles import (
 
 LOGGER = logging.getLogger(__name__)
 TraceWriter = Callable[..., None]
+
+
+def retrieval_needed_for(message: str) -> bool:
+    """Return whether the unified planner requests memory retrieval."""
+
+    return plan_retrieval(message).memory_retrieval
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +297,9 @@ class ConversationService:
     ) -> None:
         self.settings = settings
         self.providers = providers
+        self.retrieval_dictionary = load_retrieval_dictionary(
+            settings.retrieval_dictionary_json
+        )
         self.template_profile = active_template_profile(
             settings.template_profiles_json,
             settings.active_template_profile_id,
@@ -301,6 +312,7 @@ class ConversationService:
             tool_limit=settings.tool_retrieval_limit,
             tool_budget_chars=settings.tool_budget_chars,
             template_profile=self.template_profile,
+            retrieval_dictionary=self.retrieval_dictionary,
         )
         self.consolidator = consolidator or HeuristicConsolidator()
         self._stores: dict[str, SQLiteMemoryStore] = {}
@@ -311,6 +323,12 @@ class ConversationService:
 
         self.template_profile = profile
         self.context_builder.set_template_profile(profile)
+
+    def set_retrieval_dictionary(self, dictionary_json: str) -> None:
+        """Reload editable planner dictionaries without restarting the service."""
+
+        self.retrieval_dictionary = load_retrieval_dictionary(dictionary_json)
+        self.context_builder.set_retrieval_dictionary(self.retrieval_dictionary)
 
     def debug_trace_enabled(self) -> bool:
         """Return whether full diagnostic payload construction is active."""
@@ -387,12 +405,14 @@ class ConversationService:
                 source="pbrainz.conversation",
             )
         store = self._store(identity)
+        retrieval_plan = plan_retrieval(request.message, self.retrieval_dictionary)
         diagnostics: dict[str, Any] = {
             "world_uuid": request.scope.world_uuid,
             "player_uuid": request.scope.player_uuid,
             "npc_uuid": request.scope.npc_uuid,
             "session_id": request.session_id,
             "memory_enabled": True,
+            "retrieval_plan": retrieval_plan.as_diagnostic(),
         }
         recent: list[ConversationTurn] = []
         recalled: list[ConversationTurn] = []
@@ -401,7 +421,7 @@ class ConversationService:
         structured_facts: list[StructuredFact] = []
         session_turn_count = 0
         retrieval_needed = (
-            self.settings.memory_rag_enabled and retrieval_needed_for(request.message)
+            self.settings.memory_rag_enabled and retrieval_plan.memory_retrieval
         )
         try:
             session = store.ensure_session(request.session_id, request.scope, request.metadata)
@@ -411,7 +431,7 @@ class ConversationService:
                 request.scope,
                 settings_limit(self.settings.memory_recent_turns),
             )
-            if retrieval_needed:
+            if retrieval_needed and retrieval_plan.conversation_recall:
                 recalled = store.search_turns(
                     request.scope,
                     request.message,
@@ -475,8 +495,11 @@ class ConversationService:
                 ),
                 mentioned_entities=request.mentioned_entities,
                 current_topic=request.current_topic,
+                requested_kinds=retrieval_plan.requested_memory_kinds,
                 max_results=settings_limit(self.settings.memory_retrieval_limit),
                 token_budget=max(200, self.settings.memory_retrieval_limit * 120),
+                requested_tags=retrieval_plan.requested_memory_tags,
+                token_expansions=self.retrieval_dictionary.token_expansion_items(),
             )
             if retrieval_needed:
                 matches = store.retrieve_query(query)
@@ -490,6 +513,7 @@ class ConversationService:
                     "recalled_turn_count": len(recalled),
                     "retrieval_needed": retrieval_needed,
                     "retrieval_skipped": not retrieval_needed,
+                    "retrieval_plan": retrieval_plan.as_diagnostic(),
                     "day_synopsis_available": day_synopsis is not None,
                     "structured_fact_count": len(structured_facts),
                     "memory_count": store.stats().get("memory_count", 0),
@@ -548,6 +572,7 @@ class ConversationService:
                 recent_turns=tuple(recent),
                 available_tools=request.available_tools,
                 current_message=request.message,
+                retrieval_plan=retrieval_plan,
             ),
             template_profile=template_profile,
         )
@@ -1207,23 +1232,6 @@ class ConversationService:
             stats.get("episode_count", 0),
             stats.get("fact_count", 0),
         )
-
-
-_HISTORICAL_CUES = re.compile(
-    r"\b(remember|yesterday|earlier|before|last|morning|afternoon|said|told|"
-    r"happened|trust|trusted|promise|promised|agreed|again|what did|why do you|"
-    r"when did|first met|first meet|have we met|did we meet|how did we meet|"
-    r"where did we meet|our first meeting|since we met)\b",
-    re.I,
-)
-
-
-def retrieval_needed_for(message: str) -> bool:
-    """Cheap gate: keep historical RAG off the path for ordinary chatter."""
-    normalized = " ".join(str(message or "").split())
-    if not normalized:
-        return False
-    return bool(_HISTORICAL_CUES.search(normalized))
 
 
 def _tool_name(value: object) -> str:

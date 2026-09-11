@@ -51,9 +51,12 @@ class TTSTab(OutputViewMixin, CatalogViewMixin, PresetsViewMixin):
         self._default_install_request_in_flight = False
         self._default_install_refresh_after: str | None = None
         self._volume_scale_var = tk.DoubleVar(parent, value=1.0)
+        self._ambient_scale_var = tk.DoubleVar(parent, value=1.0)
         self.enabled = tk.BooleanVar(parent, value=False)
         self.device = tk.StringVar(parent, value="system/default")
         self.volume = tk.StringVar(parent, value="1.0")
+        self.ambient_volume = tk.StringVar(parent, value="1.0")
+        self.test_effect = tk.StringVar(parent, value="None")
         self.language = tk.StringVar(parent, value="English")
         self.gender = tk.StringVar(parent, value="Any")
         self.quality = tk.StringVar(parent, value="Any")
@@ -69,6 +72,7 @@ class TTSTab(OutputViewMixin, CatalogViewMixin, PresetsViewMixin):
             self.enabled,
             self.device,
             self.volume,
+            self.ambient_volume,
         ):
             variable.trace_add("write", self._mark_dirty)
 
@@ -98,6 +102,9 @@ class TTSTab(OutputViewMixin, CatalogViewMixin, PresetsViewMixin):
                 volume = float(data.get("master_volume", 1.0))
                 self.volume.set(f"{volume:.2f}")
                 self._volume_scale_var.set(volume)
+                ambient_volume = float(data.get("ambient_volume", 1.0))
+                self.ambient_volume.set(f"{ambient_volume:.2f}")
+                self._ambient_scale_var.set(ambient_volume)
                 self.language.set(
                     str(data.get("catalog_language") or self.language.get() or "English")
                 )
@@ -162,13 +169,14 @@ class TTSTab(OutputViewMixin, CatalogViewMixin, PresetsViewMixin):
                 "enabled": self.enabled.get(),
                 "output_device": self.device.get().strip(),
                 "master_volume": float(self.volume.get()),
+                "ambient_volume": float(self.ambient_volume.get()),
                 "catalog_language": self.language.get(),
                 "voice_presets": self._preset_payload(),
             }
         except ValueError:
             messagebox.showerror(
                 PRODUCT_NAME,
-                "TTS volume must be a valid number between 0 and 1.",
+                "TTS volume values must be valid numbers within their allowed ranges.",
                 parent=self.parent.winfo_toplevel(),
             )
             return

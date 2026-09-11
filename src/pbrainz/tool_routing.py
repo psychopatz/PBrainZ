@@ -11,7 +11,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{2,64}")
+from pbrainz.retrieval_dictionary import DEFAULT_STOP_WORDS
+
+_TOKEN_RE = re.compile(r"[\w-]{2,64}", re.UNICODE)
 _SAFE_TOOL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SAFE_FALLBACK_NAMES = {"social_react"}
 
@@ -39,9 +41,32 @@ class ToolSelection:
 class ToolRouter:
     """Select canonical tools without treating relevance as authorization."""
 
-    def __init__(self, *, max_results: int = 8, budget_chars: int = 2600) -> None:
+    def __init__(
+        self,
+        *,
+        max_results: int = 8,
+        budget_chars: int = 2600,
+        stop_words: tuple[str, ...] | frozenset[str] = DEFAULT_STOP_WORDS,
+        token_expansions: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    ) -> None:
         self.max_results = max(1, min(int(max_results), 32))
         self.budget_chars = max(400, min(int(budget_chars), 20000))
+        self.set_stop_words(stop_words)
+        self.set_token_expansions(token_expansions)
+
+    def set_stop_words(self, stop_words: tuple[str, ...] | frozenset[str]) -> None:
+        self.stop_words = frozenset(
+            str(word).casefold() for word in stop_words if str(word).strip()
+        )
+
+    def set_token_expansions(
+        self, token_expansions: tuple[tuple[str, tuple[str, ...]], ...]
+    ) -> None:
+        self.token_expansions = {
+            str(source).casefold(): tuple(str(value).casefold() for value in values)
+            for source, values in token_expansions
+            if str(source).strip()
+        }
 
     def select(
         self,
@@ -68,9 +93,10 @@ class ToolRouter:
             serialized_size = len(repr(card.schema))
             if selected and used_chars + serialized_size > self.budget_chars:
                 continue
-            # Keep a safe social-intent card available when supplied. It is an
-            # intent only; Project Hoomans still decides whether it applies.
-            if score <= 0 and card.name not in _SAFE_FALLBACK_NAMES:
+            # Relevance and the safe fallback are separate concerns.  A safe
+            # social card must not outrank or ride along with an unrelated
+            # movement/action tool merely because it is a fallback.
+            if score <= 0:
                 continue
             selected.append(card.schema)
             selected_names.append(card.name)
@@ -78,6 +104,8 @@ class ToolRouter:
             if len(selected) >= self.max_results:
                 break
         if not selected and fallback_safe:
+            # Keep a safe social-intent card available when supplied. It is an
+            # intent only; Project Hoomans still decides whether it applies.
             for card in eligible:
                 if card.name in _SAFE_FALLBACK_NAMES:
                     selected.append(card.schema)
@@ -124,21 +152,25 @@ class ToolRouter:
             eligible, reason = False, "client_only"
         return ToolCard(tool, name, description, tags, eligible, reason)
 
-    @staticmethod
-    def _tokens(value: str) -> set[str]:
-        return {
-            token.casefold()
-            for token in _TOKEN_RE.findall(value[:2000])
-            if len(token) >= 3
-        }
+    def _tokens(self, value: str) -> set[str]:
+        tokens: set[str] = set()
+        for token in _TOKEN_RE.findall(value[:2000]):
+            normalized = token.casefold()
+            if len(normalized) < 3 or normalized in self.stop_words:
+                continue
+            tokens.add(normalized)
+            for expansion in self.token_expansions.get(normalized, ()):
+                for expanded_token in _TOKEN_RE.findall(expansion):
+                    if (
+                        len(expanded_token) >= 3
+                        and expanded_token not in self.stop_words
+                    ):
+                        tokens.add(expanded_token)
+        return tokens
 
-    @classmethod
-    def _score(cls, card: ToolCard, query_tokens: set[str], index: int) -> float:
-        searchable = cls._tokens(" ".join((card.name, card.description, *card.tags)))
+    def _score(self, card: ToolCard, query_tokens: set[str], index: int) -> float:
+        searchable = self._tokens(" ".join((card.name, card.description, *card.tags)))
         overlap = query_tokens.intersection(searchable)
         score = float(len(overlap))
-        if card.name in _SAFE_FALLBACK_NAMES:
-            score += 0.1
         # Stable low-priority tie behavior; index is not a semantic signal.
         return score - index * 0.000001
-

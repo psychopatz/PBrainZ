@@ -13,6 +13,7 @@ from pbrainz.config import (
 )
 from pbrainz.database import SettingsDatabase
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.retrieval_dictionary import load_retrieval_dictionary
 from pbrainz.template_profiles import (
     active_template_profile,
     load_template_profiles,
@@ -76,7 +77,11 @@ def _ui_status(request: Request) -> UIStatus:
         request_timeout=settings.request_timeout,
         bridge_poll_interval=settings.bridge_poll_interval,
         zomboid_path=settings.zomboid_path,
+        memory_recent_turns=settings.memory_recent_turns,
         ui_theme=settings.ui_theme,
+        retrieval_dictionary=load_retrieval_dictionary(
+            settings.retrieval_dictionary_json
+        ).as_dict(),
         providers=provider_statuses,
         openai_base_url=settings.openai_base_url,
         bridge=bridge,

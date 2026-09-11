@@ -84,6 +84,8 @@ class MemoryQuery:
     requested_kinds: tuple[MemoryType, ...] = ()
     max_results: int = 6
     token_budget: int = 700
+    requested_tags: tuple[str, ...] = ()
+    token_expansions: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

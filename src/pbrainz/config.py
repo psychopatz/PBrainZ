@@ -53,13 +53,17 @@ class Settings(BaseSettings):
     ui_theme: str = "light"
     memory_root: str | None = None
     context_max_chars: int = Field(default=12000, ge=2000, le=100000)
-    memory_recent_turns: int = Field(default=8, ge=1, le=32)
+    # Four turns preserves the immediate exchange while keeping the default
+    # provider payload small.  Power users can raise this through the control
+    # panel or the persisted setting.
+    memory_recent_turns: int = Field(default=4, ge=1, le=32)
     memory_retrieval_limit: int = Field(default=6, ge=1, le=16)
     memory_consolidation_turns: int = Field(default=12, ge=2, le=100)
     memory_rag_enabled: bool = True
+    retrieval_dictionary_json: str = "{}"
     tool_rag_enabled: bool = True
-    tool_retrieval_limit: int = Field(default=8, ge=1, le=32)
-    tool_budget_chars: int = Field(default=2600, ge=400, le=20000)
+    tool_retrieval_limit: int = Field(default=4, ge=1, le=32)
+    tool_budget_chars: int = Field(default=1800, ge=400, le=20000)
     template_profiles_json: str = "{}"
     active_template_profile_id: str = "native-chat"
     llm_diagnostics: bool = False
@@ -78,6 +82,7 @@ class Settings(BaseSettings):
     tts_voice_catalog_language: str = Field(default="English", max_length=64)
     tts_output_device: str = ""
     tts_master_volume: float = Field(default=1.0, ge=0, le=1)
+    tts_ambient_volume: float = Field(default=1.0, ge=0, le=2)
     tts_synthesis_workers: int = Field(default=1, ge=1, le=4)
     tts_model_cache_size: int = Field(default=2, ge=1, le=16)
     tts_max_simultaneous_playback: int = Field(default=4, ge=1, le=8)

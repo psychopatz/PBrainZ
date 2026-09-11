@@ -12,6 +12,7 @@ from .about_tab import AboutTab
 from .chat_tab import ChatTab
 from .control_tab import ControlTab
 from .debug_tab import DebugTab
+from .dictionary_tab import DictionaryTab
 from .icons import load_icon
 from .memory_tab import MemoryTab
 from .request import ApiRequestRunner, RequestFailure, RequestSuccess
@@ -46,6 +47,7 @@ class PBrainZControlPanel:
         self.control_tab: ControlTab
         self.chat_tab: ChatTab
         self.template_model_tab: TemplateModelTab
+        self.retrieval_dictionary_tab: DictionaryTab
         self.memory_tab: MemoryTab
         self.debug_tab: DebugTab
         self.tts_tab: TTSTab
@@ -101,13 +103,20 @@ class PBrainZControlPanel:
             self._provider_request_timeout,
             self.save_chat_selection,
         )
+        template_pages = ttk.Notebook(template_frame)
+        template_pages.pack(fill="both", expand=True)
+        template_profile_page = ttk.Frame(template_pages)
+        dictionary_page = ttk.Frame(template_pages)
+        template_pages.add(template_profile_page, text="Template profiles")
+        template_pages.add(dictionary_page, text="Dictionaries")
         self.template_model_tab = TemplateModelTab(
-            template_frame,
+            template_profile_page,
             self.save_template_profile,
             self.activate_template_profile,
             self.delete_template_profile,
             self.reset_template_profile,
         )
+        self.retrieval_dictionary_tab = DictionaryTab(dictionary_page, self._run_request)
         self.memory_tab = MemoryTab(
             memory_frame,
             self._run_request,
@@ -378,7 +387,10 @@ class PBrainZControlPanel:
             chat_input=text_widgets[1],
             memory_detail=getattr(self.memory_tab, "detail_view", None),
             debug_detail=getattr(self.debug_tab, "detail_view", None),
-            template_views=getattr(self.template_model_tab, "text_widgets", ()),
+            template_views=(
+                *getattr(self.template_model_tab, "text_widgets", ()),
+                *getattr(self.retrieval_dictionary_tab, "text_widgets", ()),
+            ),
         )
 
     def _apply_status(self, data: dict[str, Any], success_message: str | None = None) -> None:
@@ -410,6 +422,7 @@ class PBrainZControlPanel:
         preferred = data.get("default_provider") or next(iter(providers), "")
         self.chat_tab.set_providers(providers, preferred)
         self.template_model_tab.apply_status(data, preserve_unsaved)
+        self.retrieval_dictionary_tab.apply_status(data, preserve_unsaved)
         self.tts_tab.refresh()
         if success_message == "Settings saved.":
             self.state.settings_dirty = False

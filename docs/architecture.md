@@ -14,7 +14,9 @@ PBrainZ bridge pump
   -> canonical-message ingestion + typed memory-primitives ingestion
      -> ConversationService
      -> actor-visible MemoryStore + bounded MemoryRetriever (SQLite)
+     -> RetrievalPlanner (memory/tool intent and context priorities)
      -> ContextBuilder (bounded provider messages)
+        -> Memory retrieval (exact primitives + FTS/lexical recall)
         -> ToolRouter (eligibility, relevance, top-K canonical schemas)
      -> ProviderRegistry (Gemini or OpenAI-compatible adapters)
   <- response text + optional semantic intents
@@ -107,9 +109,11 @@ participant/witness list names the actor. Private cognition never crosses that
 boundary.
 
 FTS5 is preferred when the SQLite build supplies it. The fallback is bounded
-token matching. No embedding model, `sqlite-vec`, or vector service is needed
-for this initial implementation, leaving that as a future `MemoryRetriever`
-implementation.
+token matching. Exact typed primitives such as `first_meeting` use their
+memory kind/tag before ranking, while broader history uses FTS candidates plus
+the bounded scope fallback. No embedding model, `sqlite-vec`, or vector
+service is needed for this initial implementation, leaving that as a future
+`MemoryRetriever` implementation for long-form memories.
 
 ## Context and memory lifecycle
 
@@ -118,13 +122,17 @@ implementation.
 1. Open or reuse the lazy store for the world.
 2. Read bounded working memory, the actor-visible day synopsis/facts, and a
    scene/focal-actor context.
-3. Gate historical retrieval with a cheap deterministic cue check. For
-   historical questions, filter by actor visibility, participants, entities,
-   and requested kind before bounded relevance ranking.
+3. Build a deterministic retrieval plan. Exact primitive questions use a
+   narrow kind/tag lane; broader historical questions enable older-turn recall;
+   action requests enable only the relevant tool lane. Actor visibility,
+   participants, entities, and requested kinds are applied before ranking.
+   Cue phrases, routing stop-words, and bounded token expansions come from the
+   active player-editable locale dictionary.
 4. Store the player turn.
-5. Build bounded provider messages with these optional sections: relationship,
-   scene, day synopsis, structured facts, relevant preferences, relevant
-   memories, notable state, and available tools.
+5. Build bounded provider messages with prioritized optional sections:
+   authoritative memories and requested tools are retained ahead of optional
+   scene prose. Native tool schemas are sent through the provider tool field;
+   the text prompt contains only compact tool names to avoid duplication.
    The core NPC rules, canonical character card, and current player message are
    retained under the hard character budget.
 6. Call the selected provider and store the assistant turn.
@@ -137,6 +145,13 @@ the same pbrainz store through the bridge sync outbox. The LLM path may write
 the player and provider rows immediately so the next request has low latency;
 the later canonical outbox delivery is collapsed by `message_id`, so it does
 not create a second copy.
+
+The native Templates tab exposes the locale dictionary editor. Each locale has
+independent historical, first-meeting, action/tool, stop-word, and token-
+expansion groups. The persisted profile is normalized and bounded before it
+reaches the planner, so malformed or oversized player input cannot expand the
+retrieval or authorization surface. A dictionary only affects matching and
+ranking; tool eligibility and execution remain game-owned.
 
 Typed gameplay memory primitives use the same bridge poll/ack channel but a
 separate bounded client outbox. Project Hoomans supplies only a primitive type,
@@ -157,12 +172,13 @@ without changing the game bridge contract.
 ## Semantic gameplay boundary
 
 Project Hoomans advertises canonical function schemas such as `social_react`
-and `order_follow`. `ToolRouter` applies deterministic eligibility first,
-rejecting malformed, client-only, internal, or game-ineligible cards; it then
-selects a small relevant top-K subset while preserving the exact supplied
-schema. Relevance is not authorization. The bridge pump forwards a provider
-tool call only if its name was exposed in that turn. On the game side, order
-calls are checked against the current tool list, the command registry, and
+and `order_follow`. `RetrievalPlanner` decides whether the tool lane is needed;
+`ToolRouter` then applies deterministic eligibility first, rejecting malformed,
+client-only, internal, or game-ineligible cards, and selects a small relevant
+top-K subset while preserving the exact supplied schema. Relevance is not
+authorization. The bridge pump forwards a provider tool call only if its name
+was exposed in that turn. On the game side, order calls are checked against the
+current tool list, the command registry, and
 `PNC.Client.ExecuteCompanionCommand`; server/client authority then performs the
 existing validation. The NPC ID always comes from the active conversation, not
 from model arguments.
@@ -200,7 +216,9 @@ character IDs keep separate players' memory scopes isolated.
 - Provider failures return the existing in-game fallback response and do not
   mutate gameplay state.
 - Context length, recent turns, retrieved memories, tool count, message size,
-  and consolidation cadence are all bounded by settings.
+  and consolidation cadence are all bounded by settings. Recent conversation
+  defaults to four turns and is configurable from the native Settings tab or
+  the `MEMORY_RECENT_TURNS` environment setting.
 - Diagnostics are disabled by default and include only non-secret counts,
   scopes, paths, and retrieval reasons when explicitly enabled.
 
@@ -214,7 +232,7 @@ compact context, typed memory primitive enqueue/ack behavior, and tool
 construction.
 
 Future work can add a provider-backed memory extractor, embeddings or a vector
-retriever, dynamic Tool RAG, richer authoritative SocialEvent commands,
+retriever for long-form memories, richer authoritative SocialEvent commands,
 streamed tool-call handling, and explicit player confirmation for higher-impact
 orders without changing the current ownership boundary.
 

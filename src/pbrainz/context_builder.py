@@ -13,6 +13,8 @@ from typing import Any
 from pbrainz.api.models import ChatMessage
 from pbrainz.memory.policy import is_context_eligible
 from pbrainz.memory.types import ConversationTurn, RetrievalMatch
+from pbrainz.retrieval_dictionary import RetrievalDictionary, default_retrieval_dictionary
+from pbrainz.retrieval_planner import RetrievalPlan, plan_retrieval
 from pbrainz.template_profiles import TemplateProfile, render_template
 from pbrainz.tool_routing import ToolRouter
 
@@ -34,6 +36,7 @@ class ContextInput:
     recent_turns: tuple[ConversationTurn, ...] = ()
     available_tools: tuple[dict[str, Any], ...] = ()
     current_message: str = ""
+    retrieval_plan: RetrievalPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,21 +85,38 @@ class ContextBuilder:
         tool_limit: int = 8,
         tool_budget_chars: int = 2600,
         template_profile: TemplateProfile | None = None,
+        retrieval_dictionary: RetrievalDictionary | None = None,
     ) -> None:
         self.max_chars = max(2000, min(int(max_chars), 100000))
         self.recent_turn_limit = max(1, min(int(recent_turn_limit), 32))
         self.memory_limit = max(1, min(int(memory_limit), 16))
         self.tool_rag_enabled = bool(tool_rag_enabled)
         self.template_profile = template_profile
+        self.retrieval_dictionary = retrieval_dictionary or default_retrieval_dictionary()
         self.tool_router = ToolRouter(
             max_results=tool_limit,
             budget_chars=tool_budget_chars,
+            stop_words=self.retrieval_dictionary.locale().stop_words,
+            token_expansions=self.retrieval_dictionary.token_expansion_items(),
         )
 
     def set_template_profile(self, profile: TemplateProfile) -> None:
         """Apply a profile to subsequent turns without rebuilding the service."""
 
         self.template_profile = profile
+
+    def set_recent_turn_limit(self, limit: int) -> None:
+        """Apply the persisted conversation-history preference immediately."""
+
+        self.recent_turn_limit = max(1, min(int(limit), 32))
+
+    def set_retrieval_dictionary(self, dictionary: RetrievalDictionary) -> None:
+        """Apply a locale dictionary to subsequent planner and tool requests."""
+
+        self.retrieval_dictionary = dictionary
+        locale = dictionary.locale()
+        self.tool_router.set_stop_words(locale.stop_words)
+        self.tool_router.set_token_expansions(locale.token_expansions)
 
     def build(
         self,
@@ -113,6 +133,9 @@ class ContextBuilder:
         """
 
         profile = template_profile or self.template_profile
+        retrieval_plan = value.retrieval_plan or plan_retrieval(
+            value.current_message, self.retrieval_dictionary
+        )
         sections: list[tuple[str, str, bool]] = [
             ("Core NPC Rules", self.CORE_RULES, True),
             (
@@ -158,8 +181,8 @@ class ContextBuilder:
                 metadata=match.memory.provenance,
             )
         )
-        memories_for_context = eligible_memories[: self.memory_limit]
-        eligible_recalled = tuple(
+        memories_for_context = self._deduplicate_memories(eligible_memories)[: self.memory_limit]
+        eligible_recalled = self._deduplicate_turns(tuple(
             turn
             for turn in value.recalled_turns
             if is_context_eligible(
@@ -167,7 +190,7 @@ class ContextBuilder:
                 role=turn.role,
                 metadata=turn.metadata,
             )
-        )
+        ))
         eligible_recent = tuple(
             turn
             for turn in value.recent_turns
@@ -176,6 +199,14 @@ class ContextBuilder:
                 role=turn.role,
                 metadata=turn.metadata,
             )
+        )
+        recent_content = {
+            " ".join(turn.content.casefold().split()) for turn in eligible_recent
+        }
+        eligible_recalled = tuple(
+            turn
+            for turn in eligible_recalled
+            if " ".join(turn.content.casefold().split()) not in recent_content
         )
         memories = self._render_memories(memories_for_context)
         if memories:
@@ -186,22 +217,51 @@ class ContextBuilder:
         state = self._notable_state(value.current_state)
         if state:
             sections.append(("Current State", state, False))
+        safe_social_only = len(value.available_tools) == 1 and self._tool_name(
+            value.available_tools[0]
+        ) == "social_react"
         tool_selection = self.tool_router.select(
             value.available_tools,
             value.current_message,
             current_topic=value.scene.get("current_topic")
             if isinstance(value.scene, dict)
             else None,
-            fallback_safe=True,
+            fallback_safe=retrieval_plan.tool_retrieval or safe_social_only,
         )
         selected_tools = tool_selection.selected
+        tool_requested = bool(
+            retrieval_plan.tool_retrieval or tool_selection.selected or safe_social_only
+        )
         if not self.tool_rag_enabled:
             selected_tools = tuple(value.available_tools[: self.tool_router.max_results])
+        elif not tool_requested:
+            selected_tools = ()
         tools = self._compact_tools(selected_tools)
         if tools:
             sections.append(("Available Tools", tools, False))
         if profile and profile.mode == "chat" and profile.examples:
             sections.append(("Template Example Dialogue", profile.examples, False))
+
+        # The order is the context allocator's first line of defense.  Exact
+        # memories and requested tools are more valuable than optional scene
+        # prose, so they remain available when the system budget is tight.
+        section_priority = {
+            "Core NPC Rules": 0,
+            "Template Instructions": 1,
+            "Character Card": 2,
+            "Relevant Memories": 3,
+            "Relevant Conversation Recall": 4,
+            "Available Tools": 5,
+            "Relationship Snapshot": 6,
+            "Social Action Policy": 7,
+            "Current State": 8,
+            "Conversation Scene": 9,
+            "Structured Conversational Facts": 10,
+            "Today So Far": 11,
+            "Relevant Preferences": 12,
+            "Template Example Dialogue": 13,
+        }
+        sections.sort(key=lambda section: section_priority.get(section[0], 99))
 
         omitted: list[str] = []
         system_parts: list[str] = []
@@ -225,7 +285,7 @@ class ContextBuilder:
             used += len(rendered) + 2
 
         system = "\n\n".join(system_parts)
-        recent = list(eligible_recent)[-self.recent_turn_limit :]
+        recent = list(self._deduplicate_turns(eligible_recent))[-self.recent_turn_limit :]
         current_message = value.current_message.strip()[:4000]
         if profile and profile.mode == "instruct":
             character = self._render_mapping(
@@ -282,8 +342,10 @@ class ContextBuilder:
             "tool_routing": {
                 **tool_selection.diagnostics,
                 "enabled": self.tool_rag_enabled,
+                "requested": tool_requested,
                 "sent": len(selected_tools),
             },
+            "retrieval_plan": retrieval_plan.as_diagnostic(),
             "omitted_sections": omitted,
         }
         return ContextBuildResult(
@@ -426,9 +488,9 @@ class ContextBuilder:
             visibility = memory.visibility.value
             lines.append(
                 f"- [{memory.memory_type.value}; {visibility}{day}] "
-                f"{memory.content[:900]}"
+                f"{memory.content[:600]}"
             )
-        return "\n".join(lines)[:3200]
+        return "\n".join(lines)[:2400]
 
     @staticmethod
     def _render_recalled_turns(turns: tuple[ConversationTurn, ...]) -> str:
@@ -440,8 +502,8 @@ class ContextBuilder:
                 if turn.game_day is not None
                 else ""
             )
-            lines.append(f"- [{day}{speaker}] {turn.content[:700]}")
-        return "\n".join(lines)[:3200]
+            lines.append(f"- [{day}{speaker}] {turn.content[:480]}")
+        return "\n".join(lines)[:2200]
 
     @staticmethod
     def _render_template_history(turns: list[ConversationTurn]) -> str:
@@ -459,6 +521,46 @@ class ContextBuilder:
         for tool in tools[:12]:
             function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
             name = str(function.get("name") or function.get("id") or "tool")[:100]
-            description = str(function.get("description") or "")[:220]
-            lines.append(f"- {name}: {description}".rstrip(": "))
+            # The complete schema is already sent through the provider's
+            # native tools field.  Repeating descriptions in the system prompt
+            # needlessly doubles context and can make the model treat tools as
+            # dialogue instructions.
+            lines.append(f"- {name}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _tool_name(tool: dict[str, Any]) -> str:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        return str(function.get("name") or function.get("id") or "").strip()
+
+    @staticmethod
+    def _deduplicate_memories(
+        matches: tuple[RetrievalMatch, ...],
+    ) -> tuple[RetrievalMatch, ...]:
+        seen_ids: set[str] = set()
+        seen_content: set[str] = set()
+        output: list[RetrievalMatch] = []
+        for match in matches:
+            memory_id = str(match.memory.memory_id)
+            content = " ".join(match.memory.content.casefold().split())
+            if memory_id in seen_ids or (content and content in seen_content):
+                continue
+            seen_ids.add(memory_id)
+            if content:
+                seen_content.add(content)
+            output.append(match)
+        return tuple(output)
+
+    @staticmethod
+    def _deduplicate_turns(
+        turns: tuple[ConversationTurn, ...],
+    ) -> tuple[ConversationTurn, ...]:
+        seen: set[tuple[str, str]] = set()
+        output: list[ConversationTurn] = []
+        for turn in turns:
+            key = (turn.role, " ".join(turn.content.casefold().split()))
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(turn)
+        return tuple(output)

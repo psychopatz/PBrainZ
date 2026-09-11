@@ -56,7 +56,4 @@ def test_tool_router_selects_identity_tool_for_name_question() -> None:
         "What's your name?",
     )
 
-    assert [tool["function"]["name"] for tool in selection.selected] == [
-        "ask_name",
-        "social_react",
-    ]
+    assert [tool["function"]["name"] for tool in selection.selected] == ["ask_name"]

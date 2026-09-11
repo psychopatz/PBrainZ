@@ -36,12 +36,13 @@ class SynthesisQueue:
         on_result: Callable[
             [Utterance, SynthesizedAudio | None, Exception | None], Awaitable[None]
         ],
+        ambient_volume: float = 1.0,
     ) -> None:
         self.provider = provider
         self.worker_count = max(1, min(int(workers), 4))
         self.queue: asyncio.Queue[Utterance] = asyncio.Queue(maxsize=max(1, int(capacity)))
         self.on_result = on_result
-        self.effects = AudioEffectProcessor()
+        self.effects = AudioEffectProcessor(ambient_volume)
         self._tasks: list[asyncio.Task[None]] = []
         self._executor: ThreadPoolExecutor | None = None
         self.active_workers = 0
@@ -131,7 +132,7 @@ class SpeechScheduler:
         self._loop_task: asyncio.Task[None] | None = None
         self._audio: dict[str, SynthesizedAudio] = {}
         self._streaming_ids: set[str] = set()
-        self.effects = AudioEffectProcessor()
+        self.effects = AudioEffectProcessor(settings.tts_ambient_volume)
         self._playback_semaphore = asyncio.Semaphore(
             max(1, min(settings.tts_max_simultaneous_playback, 8))
         )
@@ -141,6 +142,7 @@ class SpeechScheduler:
             settings.tts_synthesis_workers,
             max(2, settings.tts_max_generated_ahead),
             self._on_synthesis_result,
+            ambient_volume=settings.tts_ambient_volume,
         )
 
     async def start(self) -> None:

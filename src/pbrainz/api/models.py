@@ -191,6 +191,7 @@ class UISettingsRequest(BaseModel):
     request_timeout: float | None = Field(default=None, gt=0, le=600)
     bridge_poll_interval: float | None = Field(default=None, gt=0.05, le=10)
     zomboid_path: str | None = Field(default=None, min_length=1)
+    memory_recent_turns: int | None = Field(default=None, ge=1, le=32)
     ui_theme: Literal["light", "dark"] | None = None
     openai_api_key: str | None = None
     gemini_api_key: str | None = None
@@ -248,6 +249,12 @@ class UITemplateProfileSaveRequest(BaseModel):
     profile: UITemplateProfile
 
 
+class UIRetrievalDictionarySaveRequest(BaseModel):
+    """Persist the player-editable, locale-aware retrieval word dictionary."""
+
+    dictionary: dict[str, Any] = Field(default_factory=dict)
+
+
 class UITemplateProfileActionRequest(BaseModel):
     """Identify one profile for activation, deletion, or reset."""
 
@@ -285,7 +292,9 @@ class UIStatus(BaseModel):
     request_timeout: float
     bridge_poll_interval: float
     zomboid_path: str
+    memory_recent_turns: int = Field(default=4, ge=1, le=32)
     ui_theme: Literal["light", "dark"] = "light"
+    retrieval_dictionary: dict[str, Any] = Field(default_factory=dict)
     providers: list[UIProviderStatus]
     openai_base_url: str
     bridge: BridgeStatus
@@ -322,6 +331,7 @@ class UITTSSettingsRequest(BaseModel):
     catalog_language: str | None = Field(default=None, min_length=1, max_length=64)
     output_device: str | None = None
     master_volume: float | None = Field(default=None, ge=0, le=1)
+    ambient_volume: float | None = Field(default=None, ge=0, le=2)
     synthesis_workers: int | None = Field(default=None, ge=1, le=4)
     model_cache_size: int | None = Field(default=None, ge=1, le=16)
     max_simultaneous_playback: int | None = Field(default=None, ge=1, le=8)
@@ -341,11 +351,20 @@ class UITTSVoiceUninstallRequest(BaseModel):
     voice_model_id: str = Field(min_length=1, max_length=256)
 
 
-class UITTSVoicePreviewRequest(BaseModel):
+class UITTSAudioEffectRequest(BaseModel):
+    """Optional presentation DSP applied to local voice previews."""
+
+    effect_profile: str = Field(default="none", min_length=1, max_length=32)
+    environment: str = Field(default="normal", min_length=1, max_length=32)
+    effect_intensity: float = Field(default=1.0, ge=0, le=1)
+    ambient_volume: float | None = Field(default=None, ge=0, le=2)
+
+
+class UITTSVoicePreviewRequest(UITTSAudioEffectRequest):
     voice_model_id: str = Field(min_length=1, max_length=256)
 
 
-class UITTSTestRequest(BaseModel):
+class UITTSTestRequest(UITTSAudioEffectRequest):
     slot: str = Field(min_length=1, max_length=128)
     text: str = Field(
         default=f"This is a {PRODUCT_NAME} Piper voice test.", min_length=1, max_length=1200

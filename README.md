@@ -215,6 +215,14 @@ Horde automatically uses the built-in Instruct text profile per request;
 Gemini and other providers keep native chat. Activating a custom profile (or
 Instruct text explicitly) overrides that automatic Horde selection.
 
+The Templates tab also contains a Dictionaries subtab. It lets players edit
+the retrieval planner's historical, first-meeting, action/tool, and routing
+stop-word lists, plus token-expansion rules. Dictionaries are stored in the
+same portable SQLite settings database, can contain multiple locale profiles,
+and use the selected active locale for new requests. The editor accepts
+Unicode phrases and saves changes without restarting PBrainZ; shipped English
+defaults can be copied back into any locale.
+
 - default provider and model;
 - separate OpenAI Cloud endpoint/API key;
 - separate Ollama endpoint/API key (defaults to `http://127.0.0.1:11434/v1`);
@@ -225,6 +233,8 @@ Instruct text explicitly) overrides that automatic Horde selection.
   is optional and anonymous access is used when it is blank);
 - Gemini API key;
 - request timeout, bridge polling, and Project Hoomans bridge state.
+- recent conversation turns sent to the provider (default `4`, configurable
+  from `1` to `32`);
 - light or dark control-panel theme.
 
 The optional `PBRAINZ_DB` process environment variable changes the SQLite
@@ -388,10 +398,19 @@ conversation sessions/turns, commitments, provenance, and indexes. Canonical
 turns retain a stable message ID plus Project Zomboid game-day/world-age
 fields; duplicate bridge deliveries are ignored. It uses SQLite FTS5 when
 available and falls back to bounded token matching when it is not. Retrieval is
-deliberately small and deterministic: recent turns are bounded, active
-commitments are always considered, and relevant memories plus a small recall
-window from older transcript turns are selected before prompt assembly.
+deliberately small and deterministic: recent turns default to four and are
+configurable, exact typed primitives use a narrow tag/kind lane, and broader
+historical questions use hybrid FTS/lexical ranking plus a small recall window.
 Embeddings and vector extensions are not required by this foundation.
+
+Memory and tool retrieval share a deterministic retrieval planner but remain
+separate lanes. Memory records are filtered by save/actor visibility before
+ranking. Tool schemas are filtered by game eligibility and relevance, then
+sent natively to providers; only compact tool names appear in the text
+context. Player-editable locale dictionaries control the planner's cue words,
+stop-words, and bounded token expansions, but they cannot authorize tools or
+bypass game validation. Project Hoomans remains the authority that validates
+and executes returned tool calls.
 
 Memory writes are failure-contained: a database problem is logged and the
 provider request continues without memory. Consolidation runs at the configured

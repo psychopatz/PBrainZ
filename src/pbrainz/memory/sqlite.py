@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pbrainz.retrieval_dictionary import DEFAULT_TOKEN_EXPANSIONS
+
 from .policy import is_context_eligible
 from .types import (
     ConversationSession,
@@ -36,8 +38,6 @@ from .types import (
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{2,64}")
 _MAX_TEXT = 12000
 _MAX_UI_MEMORY_PAGE = 200
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -1255,30 +1255,61 @@ class SQLiteMemoryStore:
         )
 
     def retrieve_query(self, query: MemoryQuery) -> list[RetrievalMatch]:
-        """Filter by actor visibility before bounded lexical relevance ranking."""
+        """Filter by actor visibility before bounded hybrid relevance ranking.
+
+        FTS5 supplies an expanded lexical candidate set when available, while
+        the bounded scope query remains the correctness fallback.  Primitive
+        tags such as ``first_meeting`` narrow the SQL candidate set before any
+        ranking, which keeps exact facts cheap and avoids unrelated episodes.
+        """
         self.initialize()
         bounded = max(1, min(int(query.max_results), 32))
         tokens = self._query_tokens(query)
         with self._connect() as connection:
+            memory_where = [
+                "world_uuid = ?",
+                "player_uuid = ?",
+                "active = 1",
+            ]
+            memory_args: list[object] = [
+                query.scope.world_uuid,
+                query.scope.player_uuid,
+            ]
+            if query.requested_kinds:
+                placeholders = ",".join("?" for _ in query.requested_kinds)
+                memory_where.append(f"memory_type IN ({placeholders})")
+                memory_args.extend(kind.value for kind in query.requested_kinds)
+            if query.requested_tags:
+                tag_clauses = []
+                for tag in query.requested_tags[:8]:
+                    tag_clauses.append("tags_json LIKE ?")
+                    memory_args.append(f'%"{_safe_text(tag, 64)}"%')
+                if tag_clauses:
+                    memory_where.append("(" + " OR ".join(tag_clauses) + ")")
             memory_rows = connection.execute(
-                """
-                SELECT * FROM memories
-                WHERE world_uuid = ? AND player_uuid = ? AND active = 1
-                ORDER BY importance DESC, updated_at DESC LIMIT 512
-                """,
-                (query.scope.world_uuid, query.scope.player_uuid),
+                "SELECT * FROM memories WHERE "
+                + " AND ".join(memory_where)
+                + " ORDER BY importance DESC, updated_at DESC LIMIT 512",
+                memory_args,
             ).fetchall()
-            episode_rows = connection.execute(
-                """
-                SELECT * FROM conversation_episodes
-                WHERE world_uuid = ? AND player_uuid = ? AND active = 1
-                ORDER BY importance DESC, updated_at DESC LIMIT 256
-                """,
-                (query.scope.world_uuid, query.scope.player_uuid),
-            ).fetchall()
+            fts_rows = self._fts_rows(connection, query.scope, tokens)
+            episode_rows = []
+            if not query.requested_tags:
+                episode_rows = connection.execute(
+                    """
+                    SELECT * FROM conversation_episodes
+                    WHERE world_uuid = ? AND player_uuid = ? AND active = 1
+                    ORDER BY importance DESC, updated_at DESC LIMIT 256
+                    """,
+                    (query.scope.world_uuid, query.scope.player_uuid),
+                ).fetchall()
 
+        # FTS can find lower-importance records outside the bounded fallback
+        # window.  De-duplicate by ID before applying actor visibility.
+        all_memory_rows = {row["memory_id"]: row for row in memory_rows}
+        all_memory_rows.update({row["memory_id"]: row for row in fts_rows})
         records: list[MemoryRecord] = []
-        for row in memory_rows:
+        for row in all_memory_rows.values():
             if not self._row_visible(row, query.actor_id):
                 continue
             memory = self._memory(row, query.scope)
@@ -1632,13 +1663,22 @@ class SQLiteMemoryStore:
                 *query.mentioned_entities,
             ]
         )
-        return list(
-            dict.fromkeys(
-                token.casefold()
-                for token in _TOKEN_RE.findall(_safe_text(source, 4000))
-                if len(token) >= 3
-            )
-        )[:16]
+        expansions = (
+            dict(query.token_expansions)
+            if query.token_expansions is not None
+            else DEFAULT_TOKEN_EXPANSIONS
+        )
+        tokens: list[str] = []
+        for token in _TOKEN_RE.findall(_safe_text(source, 4000)):
+            normalized = token.casefold()
+            if len(normalized) < 3:
+                continue
+            for candidate in (normalized, *expansions.get(normalized, ())):
+                if candidate not in tokens:
+                    tokens.append(candidate)
+                if len(tokens) >= 24:
+                    return tokens
+        return tokens
 
     @staticmethod
     def _row_visible(
@@ -1847,16 +1887,17 @@ class SQLiteMemoryStore:
     ) -> list[sqlite3.Row]:
         if not self.fts_enabled or not tokens:
             return []
-        match = " AND ".join(f'"{token.replace(chr(34), "")}"' for token in tokens[:12])
+        match = " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens[:12])
         try:
             return connection.execute(
                 """
                 SELECT m.* FROM memory_fts f
                 JOIN memories m ON m.memory_id = f.memory_id
                 WHERE f.memory_fts MATCH ? AND m.world_uuid = ?
-                  AND m.player_uuid = ? AND m.npc_uuid = ? AND m.active = 1
+                  AND m.player_uuid = ? AND m.active = 1
+                LIMIT 128
                 """,
-                (match, scope.world_uuid, scope.player_uuid, scope.npc_uuid),
+                (match, scope.world_uuid, scope.player_uuid),
             ).fetchall()
         except sqlite3.OperationalError:
             return []

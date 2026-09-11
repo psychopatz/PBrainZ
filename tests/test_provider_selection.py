@@ -2,6 +2,10 @@ from pbrainz.config import Settings
 from pbrainz.providers.registry import ProviderRegistry
 
 
+def test_new_settings_default_to_four_recent_turns() -> None:
+    assert Settings().memory_recent_turns == 4
+
+
 def test_new_settings_default_to_gemini_template_profile() -> None:
     assert Settings().default_provider == "gemini"
 

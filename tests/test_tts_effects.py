@@ -29,6 +29,17 @@ def _tone(frequency: float, duration_ms: int = 1000) -> SynthesizedAudioChunk:
     )
 
 
+def _silence(duration_ms: int = 1000) -> SynthesizedAudioChunk:
+    count = round(SAMPLE_RATE * duration_ms / 1000)
+    return SynthesizedAudioChunk(
+        sample_rate=SAMPLE_RATE,
+        sample_width=2,
+        sample_channels=1,
+        pcm=array("h", [0] * count).tobytes(),
+        duration_ms=duration_ms,
+    )
+
+
 def _rms(chunk: SynthesizedAudioChunk, *, skip_samples: int = 1600) -> float:
     samples = array("h")
     samples.frombytes(chunk.pcm)
@@ -85,6 +96,47 @@ def test_radio_effect_changes_pcm_without_clipping() -> None:
     assert min(samples) >= -32768
 
 
+def test_radio_effect_is_audibly_band_limited() -> None:
+    processor = AudioEffectProcessor()
+    measured = {
+        frequency: _rms(
+            processor.stream(AudioPresentation(effect_profile="radio")).process(
+                _tone(frequency, duration_ms=1500)
+            )
+        )
+        for frequency in (100, 1000, 5000)
+    }
+
+    assert measured[100] < measured[1000] * 0.4
+    assert measured[5000] < measured[1000] * 0.4
+
+
+def test_radio_effect_has_persistent_static_ambience() -> None:
+    source = _silence(duration_ms=1500)
+    processed = AudioEffectProcessor().stream(
+        AudioPresentation(effect_profile="radio")
+    ).process(source)
+
+    assert _rms(processed) > 150
+    assert processed.pcm != source.pcm
+
+
+def test_radio_static_has_a_dedicated_volume() -> None:
+    source = _silence(duration_ms=1500)
+    muted = AudioEffectProcessor(ambient_volume=0).stream(
+        AudioPresentation(effect_profile="radio")
+    ).process(source)
+    normal = AudioEffectProcessor(ambient_volume=1).stream(
+        AudioPresentation(effect_profile="radio")
+    ).process(source)
+    loud = AudioEffectProcessor(ambient_volume=2).stream(
+        AudioPresentation(effect_profile="radio")
+    ).process(source)
+
+    assert _rms(muted) == 0
+    assert _rms(loud) > _rms(normal) * 1.8
+
+
 def test_underwater_effect_reduces_high_frequency_energy() -> None:
     processor = AudioEffectProcessor()
     stream = processor.stream(AudioPresentation(effect_profile="underwater"))
@@ -95,6 +147,18 @@ def test_underwater_effect_reduces_high_frequency_energy() -> None:
     )
 
     assert _rms(high) < _rms(low) * 0.5
+
+
+def test_underwater_is_more_restrictive_than_muffled() -> None:
+    muffled = AudioEffectProcessor().stream(AudioPresentation(effect_profile="muffled"))
+    underwater = AudioEffectProcessor().stream(
+        AudioPresentation(effect_profile="underwater")
+    )
+
+    muffled_voice = _rms(muffled.process(_tone(1000, duration_ms=1500)))
+    underwater_voice = _rms(underwater.process(_tone(1000, duration_ms=1500)))
+
+    assert underwater_voice < muffled_voice * 0.65
 
 
 def test_streaming_chunks_keep_filter_state() -> None:

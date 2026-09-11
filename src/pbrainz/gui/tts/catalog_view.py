@@ -640,7 +640,10 @@ class CatalogViewMixin:
         self._request(
             "POST",
             "/api/tts/voices/preview",
-            {"voice_model_id": model_id},
+            {
+                "voice_model_id": model_id,
+                **self._test_audio_presentation_payload(),
+            },
             self._preview_started,
             failure=self._preview_failed,
             timeout=45,
@@ -651,7 +654,10 @@ class CatalogViewMixin:
         # catalog snapshot. Keep the current tree and selection intact.
         self._selected_model_changed()
         voice = data.get("voice", {})
-        self.status.set(f"Playing sample for {voice.get('display_name') or 'selected voice'}.")
+        self.status.set(
+            f"Playing {self.test_effect.get()} sample for "
+            f"{voice.get('display_name') or 'selected voice'}."
+        )
 
     def _preview_failed(self, error: Exception) -> None:
         self._selected_model_changed()

@@ -64,6 +64,47 @@ def test_sqlite_memory_is_partitioned_by_world_and_pair(tmp_path) -> None:
     assert store.fts_enabled in {True, False}
 
 
+def test_tagged_primitive_retrieval_uses_narrow_scope(tmp_path) -> None:
+    store = SQLiteMemoryStore(tmp_path, "world-one")
+    scope = MemoryScope("world-one", "player-one", "npc-one")
+    store.remember(
+        MemoryRecord(
+            "first-meeting",
+            scope,
+            MemoryType.PERSONAL_EVENT,
+            "The player first met Alice on July 9, 1993 (Day 0, 15:39).",
+            tags=("primitive", "first_meeting"),
+            importance=0.8,
+            visibility=MemoryVisibility.PUBLIC,
+            participants=("player-one", "npc-one"),
+        )
+    )
+    store.remember(
+        MemoryRecord(
+            "unrelated-event",
+            scope,
+            MemoryType.PERSONAL_EVENT,
+            "The player found a backpack near the shelter.",
+            tags=("primitive", "discovery"),
+            importance=1.0,
+            visibility=MemoryVisibility.PUBLIC,
+            participants=("player-one", "npc-one"),
+        )
+    )
+
+    matches = store.retrieve_query(
+        MemoryQuery(
+            scope=scope,
+            actor_id="npc-one",
+            current_message="When did we first meet?",
+            requested_kinds=(MemoryType.PERSONAL_EVENT,),
+            requested_tags=("first_meeting",),
+        )
+    )
+
+    assert [match.memory.memory_id for match in matches] == ["first-meeting"]
+
+
 def test_context_builder_omits_normal_optional_sections_and_enforces_budget() -> None:
     builder = ContextBuilder(max_chars=2000, recent_turn_limit=2)
     result = builder.build(

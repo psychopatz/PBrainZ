@@ -569,6 +569,45 @@ async def test_installed_voice_test_plays_when_tts_is_disabled(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_installed_voice_test_applies_requested_audio_effect(tmp_path, monkeypatch) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=False))
+    provider = _FakeProvider(tmp_path)
+    output = _FakeOutput()
+    service.provider = provider
+    service.output = output
+    service.presets.replace(
+        [{"slot": "VoiceMale:0", "voice_model_id": "installed-model"}]
+    )
+    presentations = []
+
+    def record_effect(audio, presentation, ambient_volume=None):
+        presentations.append(presentation)
+        assert ambient_volume == 1.75
+        return audio
+
+    monkeypatch.setattr(service.effects, "process_wav", record_effect)
+
+    await service.start()
+    try:
+        assert await service.test_voice(
+            "VoiceMale:0",
+            "radio test",
+            {"effect_profile": "radio", "effect_intensity": 0.85},
+            ambient_volume=1.75,
+        )
+        await asyncio.wait_for(_wait_until(lambda: len(output.processes) == 1), timeout=2)
+        assert len(presentations) == 1
+        assert presentations[0].as_dict() == {
+            "effect_profile": "radio",
+            "environment": "normal",
+            "intensity": 0.85,
+        }
+        output.processes[0].release()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_enabled_tts_autoplays_generated_text_with_first_installed_preset(tmp_path) -> None:
     service = TTSService(_settings(tmp_path, tts_enabled=True))
     model_id = "en_US-amy-medium"

@@ -13,9 +13,10 @@ from uuid import uuid4
 from pbrainz.config import Settings
 from pbrainz.tts.text import normalize_tts_text
 
-from ..conversation_runtime import Utterance, VoiceBinding, VoiceBindingCache
+from ..conversation_runtime import AudioPresentation, Utterance, VoiceBinding, VoiceBindingCache
 from .audio import AudioOutput, PiperProvider
 from .catalog import VoiceCatalog
+from .effects import AudioEffectProcessor
 from .models import (
     DEFAULT_TTS_PRESETS,
     MAX_TEST_TEXT,
@@ -49,6 +50,7 @@ class TTSService:
         self.provider = PiperProvider(self.catalog, self.presets, settings)
         self.output = AudioOutput(settings)
         self.scheduler = SpeechScheduler(self.provider, self.output, settings)
+        self.effects = AudioEffectProcessor(settings.tts_ambient_volume)
         self.voice_bindings = VoiceBindingCache()
         self.last_error: str | None = None
         self._catalog_refresh_lock = asyncio.Lock()
@@ -95,6 +97,7 @@ class TTSService:
         await self.scheduler.stop()
         self.voice_bindings.clear()
         self.provider.cache.resize(self.settings.tts_model_cache_size)
+        self.effects = AudioEffectProcessor(self.settings.tts_ambient_volume)
         self.scheduler = SpeechScheduler(self.provider, self.output, self.settings)
         self.last_error = None
         await self.start()
@@ -467,7 +470,13 @@ class TTSService:
             snapshot["voice"] = job["voice"]
         return snapshot
 
-    async def preview_voice(self, model_id: str) -> VoiceModel:
+    async def preview_voice(
+        self,
+        model_id: str,
+        audio_presentation: AudioPresentation | dict[str, object] | None = None,
+        *,
+        ambient_volume: float | None = None,
+    ) -> VoiceModel:
         """Play a catalog sample without downloading the voice model."""
 
         if not self.output.available:
@@ -476,15 +485,28 @@ class TTSService:
         if model is None:
             raise TTSException(f"Piper voice is not in the catalog: {model_id}")
         sample_path = await asyncio.to_thread(self.catalog.download_sample, model.id)
-        task = asyncio.create_task(self._play_preview(sample_path), name=f"tts-preview-{model.id}")
+        presentation = AudioPresentation.from_mapping(audio_presentation)
+        task = asyncio.create_task(
+            self._play_preview(sample_path, presentation, ambient_volume),
+            name=f"tts-preview-{model.id}",
+        )
         self._preview_tasks.add(task)
         task.add_done_callback(self._preview_tasks.discard)
         return model
 
-    async def _play_preview(self, path: Path) -> None:
+    async def _play_preview(
+        self,
+        path: Path,
+        presentation: AudioPresentation,
+        ambient_volume: float | None = None,
+    ) -> None:
+        processed: SynthesizedAudio | None = None
         process: asyncio.subprocess.Process | None = None
         try:
-            process = await self.output.start(path)
+            processed = await self._apply_audio_effect(
+                SynthesizedAudio(path, 0, "catalog-preview"), presentation, ambient_volume
+            )
+            process = await self.output.start(processed.path)
             await process.wait()
         except asyncio.CancelledError:
             if process is not None and process.returncode is None:
@@ -499,6 +521,8 @@ class TTSService:
             self.last_error = f"Piper voice preview failed: {error}"
             LOGGER.warning("Piper voice preview failed: %s", error)
         finally:
+            if processed is not None and processed.path != path:
+                processed.path.unlink(missing_ok=True)
             path.unlink(missing_ok=True)
 
     def can_synthesize(self, binding: VoiceBinding | None) -> bool:
@@ -559,7 +583,14 @@ class TTSService:
 
         return await self.scheduler.cancel_conversation(str(conversation_id))
 
-    async def test_voice(self, slot: str, text: str) -> bool:
+    async def test_voice(
+        self,
+        slot: str,
+        text: str,
+        audio_presentation: AudioPresentation | dict[str, object] | None = None,
+        *,
+        ambient_volume: float | None = None,
+    ) -> bool:
         normalized_text = normalize_tts_text(text)
         if not normalized_text:
             self.last_error = "TTS skipped: test text has no speakable text"
@@ -571,8 +602,11 @@ class TTSService:
         if not self.provider.can_synthesize(binding):
             self.last_error = self._voice_test_error(binding)
             return False
+        presentation = AudioPresentation.from_mapping(audio_presentation)
         task = asyncio.create_task(
-            self._play_voice_test(binding, normalized_text[:MAX_TEST_TEXT]),
+            self._play_voice_test(
+                binding, normalized_text[:MAX_TEST_TEXT], presentation, ambient_volume
+            ),
             name=f"tts-test-{slot}",
         )
         self.last_error = None
@@ -615,7 +649,7 @@ class TTSService:
             self.last_error = self._voice_test_error(binding)
             return False
         task = asyncio.create_task(
-            self._play_voice_test(binding, normalized_text[:MAX_TEST_TEXT]),
+            self._play_voice_test(binding, normalized_text[:MAX_TEST_TEXT], AudioPresentation()),
             name=f"tts-{source}-{uuid4().hex[:8]}",
         )
         self.last_error = None
@@ -649,13 +683,20 @@ class TTSService:
             return None
         return TTSVoicePreset("VoiceFemale:0", installed[0].id)
 
-    async def _play_voice_test(self, binding: VoiceBinding, text: str) -> None:
+    async def _play_voice_test(
+        self,
+        binding: VoiceBinding,
+        text: str,
+        presentation: AudioPresentation,
+        ambient_volume: float | None = None,
+    ) -> None:
         """Synthesize and play one installed voice without enabling NPC TTS."""
 
         audio: SynthesizedAudio | None = None
         process: asyncio.subprocess.Process | None = None
         try:
             audio = await asyncio.to_thread(self.provider.synthesize, text, binding)
+            audio = await self._apply_audio_effect(audio, presentation, ambient_volume)
             process = await self.output.start(audio.path)
             await process.wait()
         except asyncio.CancelledError:
@@ -672,6 +713,24 @@ class TTSService:
         finally:
             if audio is not None:
                 audio.path.unlink(missing_ok=True)
+
+    async def _apply_audio_effect(
+        self,
+        audio: SynthesizedAudio,
+        presentation: AudioPresentation,
+        ambient_volume: float | None = None,
+    ) -> SynthesizedAudio:
+        if not presentation.requires_processing:
+            return audio
+        if ambient_volume is None:
+            processed = await asyncio.to_thread(self.effects.process_wav, audio, presentation)
+        else:
+            processed = await asyncio.to_thread(
+                self.effects.process_wav, audio, presentation, ambient_volume
+            )
+        if processed.path != audio.path:
+            audio.path.unlink(missing_ok=True)
+        return processed
 
     def _voice_test_error(self, binding: VoiceBinding) -> str:
         if not self.provider.available:
@@ -710,6 +769,7 @@ class TTSService:
             "audio_devices": self.output.devices(),
             "output_device": self.settings.tts_output_device or "system/default",
             "master_volume": self.settings.tts_master_volume,
+            "ambient_volume": self.settings.tts_ambient_volume,
             "catalog_language": self.settings.tts_voice_catalog_language,
             "model_cache_size": self.settings.tts_model_cache_size,
             "max_simultaneous_playback": self.settings.tts_max_simultaneous_playback,

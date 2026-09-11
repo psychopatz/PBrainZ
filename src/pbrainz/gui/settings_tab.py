@@ -35,6 +35,9 @@ class SettingsTab:
         self._theme_changed_callback = theme_changed
         self._tts_applying = False
         self._tts_dirty = False
+        self._memory_applying = False
+        self._memory_dirty = False
+        self.memory_recent_turns = tk.StringVar(parent, value="4")
         self.tts_workers = tk.StringVar(parent, value="1")
         self.tts_cache_size = tk.StringVar(parent, value="2")
         self.tts_playback_voices = tk.StringVar(parent, value="4")
@@ -46,6 +49,7 @@ class SettingsTab:
         self._build(parent, refresh)
         for variable in self._tts_variables():
             variable.trace_add("write", self._mark_tts_dirty)
+        self.memory_recent_turns.trace_add("write", self._mark_memory_dirty)
 
     def _build(self, parent: ttk.Frame, refresh: RefreshFn) -> None:
         parent.columnconfigure(0, weight=1)
@@ -88,8 +92,17 @@ class SettingsTab:
             runtime,
             text="Folder containing console.txt",
         ).grid(row=3, column=1, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Label(runtime, text="Control-panel theme").grid(
+        ttk.Label(runtime, text="Recent conversation turns").grid(
             row=4, column=0, sticky="w", pady=(16, 4)
+        )
+        ttk.Entry(runtime, textvariable=self.memory_recent_turns, width=16).grid(
+            row=4, column=1, sticky="ew", pady=(16, 4)
+        )
+        ttk.Label(runtime, text="Default: 4; increase for more history").grid(
+            row=4, column=2, sticky="w", padx=(8, 0), pady=(16, 4)
+        )
+        ttk.Label(runtime, text="Control-panel theme").grid(
+            row=5, column=0, sticky="w", pady=(16, 4)
         )
         self._theme_box = ttk.Combobox(
             runtime,
@@ -98,10 +111,10 @@ class SettingsTab:
             state="readonly",
             width=16,
         )
-        self._theme_box.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(16, 4))
+        self._theme_box.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(16, 4))
         self._theme_box.bind("<<ComboboxSelected>>", self._on_theme_changed)
         actions = ttk.Frame(runtime)
-        actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(16, 0))
+        actions.grid(row=6, column=0, columnspan=3, sticky="e", pady=(16, 0))
         ttk.Button(actions, text="Refresh", command=refresh).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Save settings", command=self._save).pack(side="left")
 
@@ -162,11 +175,18 @@ class SettingsTab:
             self._tts_dirty = True
             self.state.settings_dirty = True
 
+    def _mark_memory_dirty(self, *_args: object) -> None:
+        if not self._memory_applying:
+            self._memory_dirty = True
+            self.state.settings_dirty = True
+
     def apply_status(self, data: dict[str, Any], preserve_unsaved: bool) -> None:
-        if preserve_unsaved and self._tts_dirty:
+        if preserve_unsaved and (self._tts_dirty or self._memory_dirty):
             return
+        self._memory_applying = True
         self._tts_applying = True
         try:
+            self.memory_recent_turns.set(str(data.get("memory_recent_turns", 4)))
             self.tts_workers.set(str(data.get("tts_synthesis_workers", 1)))
             self.tts_cache_size.set(str(data.get("tts_model_cache_size", 2)))
             self.tts_playback_voices.set(str(data.get("tts_max_simultaneous_playback", 4)))
@@ -176,15 +196,20 @@ class SettingsTab:
             self.tts_synthesis_timeout.set(str(data.get("tts_synthesis_timeout", 45)))
             self.tts_buffer_ms.set(str(data.get("tts_audio_buffer_ms", 50)))
         finally:
+            self._memory_applying = False
             self._tts_applying = False
 
     def mark_saved(self) -> None:
         self._tts_dirty = False
+        self._memory_dirty = False
 
     def _save(self) -> None:
         try:
             timeout = float(self.state.timeout.get())
             poll_interval = float(self.state.poll_interval.get())
+            recent_turns = int(self.memory_recent_turns.get())
+            if not 1 <= recent_turns <= 32:
+                raise ValueError
             tts_values = {
                 "tts_synthesis_workers": int(self.tts_workers.get()),
                 "tts_model_cache_size": int(self.tts_cache_size.get()),
@@ -208,6 +233,7 @@ class SettingsTab:
                 "bridge_poll_interval": poll_interval,
                 "zomboid_path": self.state.zomboid_path.get().strip() or None,
                 "ui_theme": self.state.theme.get(),
+                "memory_recent_turns": recent_turns,
                 **tts_values,
             }
         )

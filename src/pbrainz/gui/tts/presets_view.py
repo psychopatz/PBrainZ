@@ -161,7 +161,13 @@ class PresetsViewMixin:
         self._request(
             "POST",
             "/api/tts/test",
-            {"slot": slot, "text": f"This is the {PRODUCT_NAME} {slot} voice test."},
-            lambda _data: self.status.set(f"Playing {slot} voice test."),
+            {
+                "slot": slot,
+                "text": f"This is the {PRODUCT_NAME} {slot} voice test.",
+                **self._test_audio_presentation_payload(),
+            },
+            lambda _data: self.status.set(
+                f"Playing {slot} voice test with {self.test_effect.get()} effect."
+            ),
             failure=lambda error: self.status.set(f"Voice test failed: {error}"),
         )

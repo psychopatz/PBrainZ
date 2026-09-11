@@ -19,6 +19,7 @@ from pbrainz.api.models import (
     UIDebugTraceSettingsRequest,
     UILogResponse,
     UIModelRefreshRequest,
+    UIRetrievalDictionarySaveRequest,
     UISettingsRequest,
     UIStatus,
     UITemplateModelAddRequest,
@@ -31,6 +32,7 @@ from pbrainz.api.models import (
     UITTSVoiceUninstallRequest,
 )
 from pbrainz.config import OPENAI_COMPATIBLE_PROVIDERS
+from pbrainz.conversation_runtime import AudioPresentation
 from pbrainz.conversation_service import ConversationRequest
 from pbrainz.database import (
     DEFAULT_ACTIVITY_LIMIT,
@@ -52,6 +54,7 @@ from pbrainz.memory import (
 )
 from pbrainz.paths import normalize_zomboid_path
 from pbrainz.providers.registry import ProviderRegistry
+from pbrainz.retrieval_dictionary import load_retrieval_dictionary
 from pbrainz.template_profiles import (
     active_template_profile,
     delete_template_profile,
@@ -144,6 +147,11 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
             if body.bridge_poll_interval is not None
             else settings.bridge_poll_interval
         ),
+        "memory_recent_turns": (
+            body.memory_recent_turns
+            if body.memory_recent_turns is not None
+            else settings.memory_recent_turns
+        ),
         "ui_theme": body.ui_theme or settings.ui_theme,
     }
     path_changed = False
@@ -181,6 +189,12 @@ async def update_ui_settings(request: Request, body: UISettingsRequest) -> UISta
     settings.default_model = selected_model
     settings.request_timeout = values["request_timeout"]
     settings.bridge_poll_interval = values["bridge_poll_interval"]
+    settings.memory_recent_turns = values["memory_recent_turns"]
+    conversation_service = getattr(request.app.state, "conversation_service", None)
+    if conversation_service is not None:
+        conversation_service.context_builder.set_recent_turn_limit(
+            settings.memory_recent_turns
+        )
     settings.ui_theme = values["ui_theme"]
     if path_changed:
         settings.zomboid_path = str(values["zomboid_path"])
@@ -291,6 +305,38 @@ async def save_ui_template_profile(
     settings.template_profiles_json = serialized
     _apply_active_template_profile(request)
     LOGGER.info("template profile saved id=%s mode=%s", profile.id, profile.mode)
+    return _ui_status(request)
+
+
+@router.post("/api/retrieval-dictionary", response_model=UIStatus, tags=["control-panel"])
+async def save_ui_retrieval_dictionary(
+    request: Request, body: UIRetrievalDictionarySaveRequest
+) -> UIStatus:
+    """Persist and immediately activate the player-editable retrieval dictionary."""
+
+    settings = request.app.state.settings
+    try:
+        dictionary = load_retrieval_dictionary(body.dictionary)
+        serialized = dictionary.as_json()
+        request.app.state.database.save_settings(
+            {"retrieval_dictionary_json": serialized}
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not save retrieval dictionary: {error}",
+        ) from error
+    settings.retrieval_dictionary_json = serialized
+    conversation_service = getattr(request.app.state, "conversation_service", None)
+    if conversation_service is not None and hasattr(
+        conversation_service, "set_retrieval_dictionary"
+    ):
+        conversation_service.set_retrieval_dictionary(serialized)
+    LOGGER.info(
+        "retrieval dictionary saved active_locale=%s locales=%s",
+        dictionary.active_locale,
+        len(dictionary.locales),
+    )
     return _ui_status(request)
 
 
@@ -787,6 +833,7 @@ async def update_tts_settings(request: Request, body: UITTSSettingsRequest) -> d
         "catalog_language": "tts_voice_catalog_language",
         "output_device": "tts_output_device",
         "master_volume": "tts_master_volume",
+        "ambient_volume": "tts_ambient_volume",
         "synthesis_workers": "tts_synthesis_workers",
         "model_cache_size": "tts_model_cache_size",
         "max_simultaneous_playback": "tts_max_simultaneous_playback",
@@ -920,7 +967,11 @@ async def preview_tts_voice(request: Request, body: UITTSVoicePreviewRequest) ->
     service: TTSService = request.app.state.tts
     await service.refresh_catalog()
     try:
-        model = await service.preview_voice(body.voice_model_id)
+        model = await service.preview_voice(
+            body.voice_model_id,
+            AudioPresentation.from_mapping(body.model_dump()),
+            ambient_volume=body.ambient_volume,
+        )
     except TTSException as error:
         status_code = 404 if "not in the catalog" in str(error) else 409
         service.last_error = str(error)[:500]
@@ -936,7 +987,12 @@ async def preview_tts_voice(request: Request, body: UITTSVoicePreviewRequest) ->
 @router.post("/api/tts/test", tags=["tts"])
 async def test_tts(request: Request, body: UITTSTestRequest) -> dict[str, object]:
     service: TTSService = request.app.state.tts
-    accepted = await service.test_voice(body.slot, body.text)
+    accepted = await service.test_voice(
+        body.slot,
+        body.text,
+        AudioPresentation.from_mapping(body.model_dump()),
+        ambient_volume=body.ambient_volume,
+    )
     if not accepted:
         raise HTTPException(
             status_code=409, detail=service.last_error or "TTS test was not accepted"
