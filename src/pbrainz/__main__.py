@@ -71,7 +71,11 @@ def _run_server() -> None:
     try:
         from .gui import PBrainZControlPanel
 
-        PBrainZControlPanel(settings.host, settings.port).run()
+        PBrainZControlPanel(
+            settings.host,
+            settings.port,
+            initial_theme=settings.ui_theme,
+        ).run()
     except Exception as error:
         print(f"Native GUI is unavailable ({error}); {PRODUCT_NAME} API remains running.")
         server_thread.join()

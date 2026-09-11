@@ -23,5 +23,8 @@ if ! "${VENV_PYTHON}" -c 'import fastapi, google.genai, openai, pydantic_setting
     "${VENV_PYTHON}" -m pip install "${PROJECT_ROOT}"
 fi
 
+# Keep source launches portable and independent of the caller's working
+# directory. An explicit user override remains authoritative.
+export PBRAINZ_PORTABLE_ROOT="${PBRAINZ_PORTABLE_ROOT:-${PROJECT_ROOT}}"
 cd "${PROJECT_ROOT}"
 exec "${VENV_PYTHON}" -m pbrainz "$@"

@@ -26,7 +26,7 @@ from .tts.tab import TTSTab
 class PBrainZControlPanel:
     """Coordinate independent native tabs around one local API client."""
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, initial_theme: str = "light") -> None:
         self.root = tk.Tk(className=PRODUCT_BINARY_NAME)
         self.root.title(f"{PRODUCT_BINARY_NAME} v{PRODUCT_VERSION}")
         self._window_icon: tk.PhotoImage | None = None
@@ -36,7 +36,7 @@ class PBrainZControlPanel:
         self.root.minsize(680, 580)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-        self.state = PanelState.create(self.root)
+        self.state = PanelState.create(self.root, theme=initial_theme)
         self.state.bind_dirty_tracking()
         self._requests = ApiRequestRunner(self.root, host, port)
         self.base_url = self._requests.base_url
@@ -84,6 +84,8 @@ class PBrainZControlPanel:
             self._apply_status,
             self._request_failed,
             save_selection=self.save_selection,
+            save_settings=self.save_settings,
+            test_api=self.test_provider_api,
             brand_icon=self._brand_icon,
         )
         self.settings_tab = SettingsTab(
@@ -175,20 +177,72 @@ class PBrainZControlPanel:
                 "default_provider": self.state.provider.get() or None,
                 "default_model": self.state.model.get() or None,
                 **runtime_values,
-                "openai_base_url": self.state.openai_base_url.get().strip() or None,
-                "openai_api_key": self.state.openai_key.get() or None,
-                "ollama_base_url": self.state.ollama_base_url.get().strip() or None,
-                "ollama_api_key": self.state.ollama_key.get() or None,
-                "lmstudio_base_url": self.state.lmstudio_base_url.get().strip() or None,
-                "lmstudio_api_key": self.state.lmstudio_key.get() or None,
-                "custom_base_url": self.state.custom_base_url.get().strip() or None,
-                "custom_api_key": self.state.custom_key.get() or None,
-                "horde_base_url": self.state.horde_base_url.get().strip() or None,
-                "horde_api_key": self.state.horde_key.get() or None,
-                "gemini_api_key": self.state.gemini_key.get() or None,
+                **self._provider_settings_payload(),
             },
             lambda data: self._apply_status(data, "Settings saved."),
         )
+
+    def test_provider_api(
+        self,
+        provider: str,
+        model: str,
+        success: RequestSuccess,
+        failure: RequestFailure,
+        timeout: float,
+    ) -> None:
+        """Save the visible provider fields before sending the API test."""
+
+        payload = {
+            "default_provider": provider,
+            "default_model": model,
+            **self._provider_settings_payload(),
+        }
+
+        def settings_saved(data: dict[str, Any]) -> None:
+            # Keep other in-progress edits in the UI while refreshing the
+            # server's configured-provider flags from the save response.
+            self._apply_status(data)
+            self._run_request(
+                "POST",
+                "/api/chat",
+                {
+                    "provider": provider,
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"Reply with exactly: {PRODUCT_NAME} API OK",
+                        }
+                    ],
+                },
+                success,
+                failure=failure,
+                timeout=timeout,
+            )
+
+        self._run_request(
+            "POST",
+            "/api/settings",
+            payload,
+            settings_saved,
+            failure=failure,
+            timeout=8,
+        )
+
+    def _provider_settings_payload(self) -> dict[str, Any]:
+        return {
+            "openai_base_url": self.state.openai_base_url.get().strip() or None,
+            "openai_api_key": self.state.openai_key.get() or None,
+            "ollama_base_url": self.state.ollama_base_url.get().strip() or None,
+            "ollama_api_key": self.state.ollama_key.get() or None,
+            "lmstudio_base_url": self.state.lmstudio_base_url.get().strip() or None,
+            "lmstudio_api_key": self.state.lmstudio_key.get() or None,
+            "custom_base_url": self.state.custom_base_url.get().strip() or None,
+            "custom_api_key": self.state.custom_key.get() or None,
+            "horde_base_url": self.state.horde_base_url.get().strip() or None,
+            "horde_api_key": self.state.horde_key.get() or None,
+            "gemini_api_key": self.state.gemini_key.get() or None,
+        }
 
     def save_selection(self, provider: str, model: str) -> None:
         """Persist the active provider/model so new requests use it immediately."""
@@ -280,7 +334,11 @@ class PBrainZControlPanel:
         self._run_request(
             "POST",
             "/api/settings",
-            {"default_provider": provider, "default_model": model},
+            {
+                "default_provider": provider,
+                "default_model": model,
+                **self._provider_settings_payload(),
+            },
             lambda data: self._chat_selection_saved(generation, data),
             failure=lambda error: self._chat_selection_failed(generation, error),
         )

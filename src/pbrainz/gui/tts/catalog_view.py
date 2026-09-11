@@ -118,6 +118,12 @@ class CatalogViewMixin:
         )
         self._install_progress.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         self._install_progress.grid_remove()
+        self._default_install_button = ttk.Button(
+            catalog_actions,
+            text="Download default voices",
+            command=self._download_defaults,
+        )
+        self._default_install_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
 
     def _language_changed(self, _event: object | None = None) -> None:
         """Rerender immediately and persist this lightweight filter preference."""
@@ -275,26 +281,114 @@ class CatalogViewMixin:
             self._uninstall_button.configure(state="disabled", text="Not installed")
 
     def _sync_default_install(self, data: dict[str, Any]) -> None:
-        """Show and poll the service-owned sequential default setup job."""
+        """Show, poll, and prompt for the service-owned default setup job."""
 
         install = data.get("default_voice_install") or {}
         state = str(install.get("state") or "")
-        if install and state not in {"failed", "cancelled"}:
+        if state in {"preparing", "queued", "installing"}:
             self._automatic_install_in_flight = True
             self._install_model_id = str(install.get("voice_model_id") or "")
             self._show_install_progress(install)
+            self._default_install_button.configure(
+                state="disabled", text="Installing defaults…"
+            )
             self._queue_default_install_poll()
             return
-        if not self._automatic_install_in_flight:
+        if state in {"failed", "cancelled"}:
+            self._clear_default_install_display()
+            error = str(install.get("error") or "Default voice download failed")
+            self.catalog_status.set(
+                f"Default voice download failed: {error}. Retry is available."
+            )
+            self._default_install_button.configure(state="normal", text="Retry default voices")
             return
+        if state == "complete":
+            self._clear_default_install_display()
+            self._default_install_button.configure(
+                state="disabled", text="Default voices installed"
+            )
+            return
+        if data.get("default_voice_setup_needed"):
+            self._default_install_button.configure(state="normal", text="Download default voices")
+            if (
+                data.get("enabled")
+                and not int(data.get("catalog_installed") or 0)
+                and not self._default_install_prompted
+                and not self._install_job_id
+                and not self._install_request_in_flight
+                and not self._uninstall_request_in_flight
+            ):
+                self._default_install_prompted = True
+                self.parent.after(50, self._confirm_default_install)
+            return
+        self._clear_default_install_display()
+        self._default_install_button.configure(state="disabled", text="Default voices installed")
+
+    def _confirm_default_install(self) -> None:
+        if (
+            self._default_install_request_in_flight
+            or self._automatic_install_in_flight
+            or self._install_job_id
+            or self._install_request_in_flight
+            or self._uninstall_request_in_flight
+        ):
+            return
+        if not messagebox.askyesno(
+            PRODUCT_NAME,
+            "There are no models found.\n\nDownload defaults now?",
+            parent=self.parent.winfo_toplevel(),
+        ):
+            self.catalog_status.set(
+                "Default voice download skipped. Use Download default voices to retry."
+            )
+            return
+        self._start_default_install()
+
+    def _download_defaults(self) -> None:
+        if (
+            self._default_install_request_in_flight
+            or self._automatic_install_in_flight
+            or self._install_job_id
+            or self._install_request_in_flight
+            or self._uninstall_request_in_flight
+        ):
+            return
+        self._confirm_default_install()
+
+    def _start_default_install(self) -> None:
+        self._default_install_request_in_flight = True
+        self._default_install_button.configure(state="disabled", text="Starting defaults…")
+        self.catalog_status.set("Starting default voice download…")
+        self._request(
+            "POST",
+            "/api/tts/defaults/install",
+            None,
+            self._default_install_started,
+            failure=self._default_install_start_failed,
+            timeout=30,
+        )
+
+    def _default_install_started(self, data: dict[str, Any]) -> None:
+        self._default_install_request_in_flight = False
+        self._default_install_prompted = True
+        self.apply_status(data)
+
+    def _default_install_start_failed(self, error: Exception) -> None:
+        self._default_install_request_in_flight = False
+        self._clear_default_install_display()
+        self.catalog_status.set(
+            f"Default voice download could not start: {error}. Retry is available."
+        )
+        self._default_install_button.configure(state="normal", text="Retry default voices")
+
+    def _clear_default_install_display(self) -> None:
         self._automatic_install_in_flight = False
         if self._default_install_refresh_after is not None:
             self.parent.after_cancel(self._default_install_refresh_after)
         self._default_install_refresh_after = None
-        if not self._install_job_id and not self._install_request_in_flight:
-            self._install_model_id = None
-            self._install_progress.stop()
-            self._install_progress.grid_remove()
+        self._install_model_id = None
+        self._install_progress.stop()
+        self._install_progress.grid_remove()
 
     def _queue_default_install_poll(self, delay: int = 500) -> None:
         if self._default_install_refresh_after is not None:

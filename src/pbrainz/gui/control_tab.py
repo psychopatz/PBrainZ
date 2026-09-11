@@ -8,9 +8,10 @@ from tkinter import scrolledtext, ttk
 from typing import Any
 
 from pbrainz.branding import PRODUCT_NAME
+from pbrainz.config import NO_API_KEY_PROVIDERS, PROVIDER_DEFAULT_BASE_URLS
 
 from .icons import scale_icon
-from .request import RequestFn
+from .request import RequestFailure, RequestFn, RequestSuccess
 from .state import PanelState
 
 StatusFn = Callable[[dict[str, Any], str | None], None]
@@ -30,12 +31,18 @@ class ControlTab:
         request_failed: ErrorFn,
         brand_icon: tk.PhotoImage | None = None,
         save_selection: SelectionSaveFn | None = None,
+        save_settings: Callable[[], None] | None = None,
+        test_api: (
+            Callable[[str, str, RequestSuccess, RequestFailure, float], None] | None
+        ) = None,
     ) -> None:
         self.state = state
         self._request = request
         self._apply_status = apply_status
         self._request_failed = request_failed
         self._save_selection = save_selection
+        self._save_settings = save_settings
+        self._test_api_request = test_api
         self._brand_icon = brand_icon
         self._rendered_provider: str | None = None
         self._selected_models: dict[str, str] = {}
@@ -47,6 +54,8 @@ class ControlTab:
         self.provider_box: ttk.Combobox
         self.model_box: ttk.Combobox
         self.log_view: scrolledtext.ScrolledText
+        for variable in self._provider_input_variables():
+            variable.trace_add("write", self._provider_input_changed)
         self._build(parent)
 
     def _build(self, parent: ttk.Frame) -> None:
@@ -125,6 +134,10 @@ class ControlTab:
         ttk.Button(provider_actions, text="Test API", command=self.test_api).pack(
             side="left", padx=(0, 10)
         )
+        if self._save_settings is not None:
+            ttk.Button(
+                provider_actions, text="Save settings", command=self._save_settings
+            ).pack(side="left", padx=(0, 10))
         ttk.Label(provider_actions, textvariable=self._api_test_status).pack(side="left")
         self._render_provider_settings()
 
@@ -243,6 +256,20 @@ class ControlTab:
             return
         self._api_test_in_flight = True
         self._api_test_status.set(f"Testing {provider}/{model}…")
+        timeout = self._provider_request_timeout()
+        if self._test_api_request is not None:
+            self._test_api_request(
+                provider,
+                model,
+                self._api_test_succeeded,
+                self._api_test_failed,
+                timeout,
+            )
+            return
+        self._request_chat_test(provider, model, timeout)
+
+    def _request_chat_test(self, provider: str, model: str, timeout: float) -> None:
+        """Send the test request after any caller-owned save step completes."""
         self._request(
             "POST",
             "/api/chat",
@@ -258,7 +285,7 @@ class ControlTab:
             },
             self._api_test_succeeded,
             failure=self._api_test_failed,
-            timeout=self._provider_request_timeout(),
+            timeout=timeout,
         )
 
     def _api_test_succeeded(self, data: dict[str, Any]) -> None:
@@ -293,10 +320,7 @@ class ControlTab:
             self._selected_models[self.state.provider.get()] = preferred
         self._active_provider = self.state.provider.get()
         self._active_model = self.state.model.get()
-        configured = self.state.provider_configured.get(self.state.provider.get(), False)
-        self.state.provider_info.set(
-            "Configured" if configured else "API key or endpoint is missing"
-        )
+        self._update_provider_info()
         self._render_provider_settings()
         if _event is not None:
             self._persist_selection()
@@ -328,6 +352,65 @@ class ControlTab:
     def _set_if_changed(variable: tk.StringVar, value: str) -> None:
         if variable.get() != value:
             variable.set(value)
+
+    def _update_provider_info(self) -> None:
+        provider = self.state.provider.get()
+        configured = self.state.provider_configured.get(provider, False)
+        if configured:
+            message = "Configured"
+        elif self._provider_has_local_configuration(provider):
+            message = "Configured (unsaved)"
+        else:
+            message = "API key or endpoint is missing"
+        self.state.provider_info.set(message)
+
+    def _provider_input_changed(self, *_args: object) -> None:
+        self._update_provider_info()
+
+    def _provider_has_local_configuration(self, provider: str) -> bool:
+        key_variables = {
+            "openai": self.state.openai_key,
+            "ollama": self.state.ollama_key,
+            "lmstudio": self.state.lmstudio_key,
+            "custom": self.state.custom_key,
+            "horde": self.state.horde_key,
+            "gemini": self.state.gemini_key,
+        }
+        key = key_variables.get(provider)
+        if provider == "gemini":
+            return bool(key and key.get().strip())
+        endpoint_variables = {
+            "openai": self.state.openai_base_url,
+            "ollama": self.state.ollama_base_url,
+            "lmstudio": self.state.lmstudio_base_url,
+            "custom": self.state.custom_base_url,
+            "horde": self.state.horde_base_url,
+        }
+        endpoint = endpoint_variables.get(provider)
+        if endpoint is None:
+            return False
+        if provider in NO_API_KEY_PROVIDERS:
+            return bool(endpoint.get().strip())
+        return bool(
+            (key and key.get().strip())
+            or endpoint.get().strip().rstrip("/")
+            != PROVIDER_DEFAULT_BASE_URLS.get(provider, "")
+        )
+
+    def _provider_input_variables(self) -> tuple[tk.StringVar, ...]:
+        return (
+            self.state.openai_base_url,
+            self.state.openai_key,
+            self.state.ollama_base_url,
+            self.state.ollama_key,
+            self.state.lmstudio_base_url,
+            self.state.lmstudio_key,
+            self.state.custom_base_url,
+            self.state.custom_key,
+            self.state.horde_base_url,
+            self.state.horde_key,
+            self.state.gemini_key,
+        )
 
     def _render_provider_settings(self) -> None:
         provider = self.state.provider.get()

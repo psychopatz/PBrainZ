@@ -752,6 +752,26 @@ async def install_tts_voice(request: Request, body: UITTSVoiceInstallRequest) ->
     }
 
 
+@router.post("/api/tts/defaults/install", tags=["tts"])
+async def install_default_tts_voices(request: Request) -> dict[str, object]:
+    """Start the default voice setup after the panel receives user consent."""
+
+    service: TTSService = request.app.state.tts
+    await service.refresh_catalog()
+    try:
+        install = service.start_default_install()
+    except TTSException as error:
+        service.last_error = str(error)[:500]
+        raise HTTPException(status_code=409, detail=service.last_error) from error
+    return {
+        "status": "ok",
+        "accepted": install.get("state") in {"preparing", "queued", "installing"},
+        "install": install,
+        "message": "Default Piper voice setup started.",
+        **service.status(),
+    }
+
+
 @router.get("/api/tts/voices/install/{job_id}", tags=["tts"])
 async def tts_voice_install_status(request: Request, job_id: str) -> dict[str, object]:
     """Return progress for one background Piper voice installation."""

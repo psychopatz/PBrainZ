@@ -34,6 +34,11 @@ if ($NeedsDependencies) {
     }
 }
 
+# Keep source launches portable and independent of the caller's working
+# directory. An explicit user override remains authoritative.
+if (-not $env:PBRAINZ_PORTABLE_ROOT) {
+    $env:PBRAINZ_PORTABLE_ROOT = $ProjectRoot
+}
 Set-Location -LiteralPath $ProjectRoot
 & $VenvPython -m pbrainz @args
 exit $LASTEXITCODE

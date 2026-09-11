@@ -65,7 +65,10 @@ panel.
 
 The panel's Chat test tab and Test API button send direct provider requests
 through `/api/chat`, so providers can be checked before Project Hoomans is
-running. The game-facing `/v1/chat/completions` endpoint remains bridge-gated.
+running. Test API first saves the provider, model, endpoint, and key currently
+visible in the panel; the separate `Save settings` button is also available
+without running a request. The game-facing `/v1/chat/completions` endpoint
+remains bridge-gated.
 
 The optional TTS tab configures local Piper synthesis and OS audio playback.
 TTS is disabled by default. The TTS tab loads Piper's official remote voice
@@ -75,6 +78,11 @@ verification. Installed files are placed under the configured model root.
 The `piper-tts` runtime is included in source installs and release bundles, so
 an installed voice can be synthesized locally when an OS audio player such as
 Linux PipeWire's `pw-play` or FFmpeg's `ffplay` is available.
+Default voice downloads are opt-in: when TTS is enabled and no default voices
+are installed, the panel asks `There are no models found. Download defaults
+now?` before starting a download. The download retries transient failures with
+backoff, keeps a failed status visible, and exposes `Retry default voices` so a
+firewall or connectivity issue can be corrected without restarting PBrainZ.
 Press `Refresh catalog` to update the remote list. Select a voice and use
 `Test selected voice` to play Piper's pre-generated sample without installing
 the model; `Install selected voice` downloads it for local synthesis with a
@@ -128,7 +136,9 @@ copy self-contained and movable. Set `PBRAINZ_DB` to override the database
 location. The database is created fresh for each portable copy, is local-only,
 and should be kept private. Never include `data/` in a release archive or
 upload it with the executable; it is runtime state and may contain provider
-credentials.
+credentials. Existing `data/hoomansllm.db` files from older releases are
+merged into `data/pbrainz.db` on the first PBrainZ launch; existing PBrainZ
+values remain authoritative and the old file is retained as a backup.
 
 Provider model catalogs are cached per provider in SQLite and loaded during
 startup. By default startup does not make network requests; the panel's

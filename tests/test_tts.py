@@ -374,6 +374,94 @@ async def test_default_voice_setup_installs_selected_defaults_in_order(
     assert service._default_setup_complete is True
 
 
+@pytest.mark.asyncio
+async def test_tts_start_waits_for_explicit_default_download_request(monkeypatch, tmp_path) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    monkeypatch.setattr(service.scheduler, "start", _async_noop)
+
+    await service.start()
+
+    try:
+        assert service._default_install_task is None
+        assert service.default_voice_setup_needed() is True
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_default_voice_setup_retries_and_keeps_terminal_failure(
+    monkeypatch, tmp_path
+) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    service.presets.ensure_defaults()
+    service.catalog.models = {
+        model_id: VoiceModel(
+            model_id,
+            model_id,
+            installed=False,
+            model_url="https://example.invalid/model.onnx",
+            config_url="https://example.invalid/model.onnx.json",
+        )
+        for _slot, model_id in DEFAULT_TTS_PRESETS
+    }
+    monkeypatch.setattr(service, "refresh_catalog", _async_noop)
+    monkeypatch.setattr("pbrainz.tts.service.DEFAULT_INSTALL_RETRY_DELAYS", (0.0, 0.0))
+    attempts: dict[str, int] = {}
+
+    def flaky_start_voice_install(model_id: str) -> dict[str, object]:
+        attempts[model_id] = attempts.get(model_id, 0) + 1
+        if attempts[model_id] == 1:
+            raise TTSException("Windows Defender blocked the download")
+        model = service.catalog.models[model_id]
+        service.catalog.models[model_id] = replace(model, installed=True)
+        return {"job_id": "", "state": "complete"}
+
+    monkeypatch.setattr(service, "start_voice_install", flaky_start_voice_install)
+
+    await service._install_default_voices()
+
+    assert set(attempts.values()) == {2}
+    assert service._default_setup_complete is True
+    assert service.default_install_status()["state"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_default_voice_setup_exposes_failed_state_for_manual_retry(
+    monkeypatch, tmp_path
+) -> None:
+    service = TTSService(_settings(tmp_path, tts_enabled=True))
+    service.presets.ensure_defaults()
+    service.catalog.models = {
+        model_id: VoiceModel(
+            model_id,
+            model_id,
+            installed=False,
+            model_url="https://example.invalid/model.onnx",
+            config_url="https://example.invalid/model.onnx.json",
+        )
+        for _slot, model_id in DEFAULT_TTS_PRESETS
+    }
+    monkeypatch.setattr(service, "refresh_catalog", _async_noop)
+    monkeypatch.setattr("pbrainz.tts.service.DEFAULT_INSTALL_RETRY_DELAYS", (0.0, 0.0))
+
+    def failed_start_voice_install(_model_id: str) -> dict[str, object]:
+        raise TTSException("network unavailable")
+
+    monkeypatch.setattr(
+        service,
+        "start_voice_install",
+        failed_start_voice_install,
+    )
+
+    await service._install_default_voices()
+
+    failure = service.default_install_status()
+    assert failure is not None
+    assert failure["state"] == "failed"
+    assert "network unavailable" in failure["error"]
+    assert service._default_setup_complete is False
+
+
 async def _async_noop(*_args, **_kwargs) -> bool:
     return True
 

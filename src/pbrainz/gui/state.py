@@ -43,9 +43,10 @@ class PanelState:
     closed: bool = False
 
     @classmethod
-    def create(cls, root: tk.Misc) -> PanelState:
+    def create(cls, root: tk.Misc, theme: str = "light") -> PanelState:
         """Create all shared Tk variables on the panel's interpreter."""
 
+        initial_theme = theme if theme in {"light", "dark"} else "light"
         return cls(
             status=tk.StringVar(root, value=f"Starting {PRODUCT_NAME}…"),
             bridge_status=tk.StringVar(root, value="Checking Project Hoomans bridge…"),
@@ -56,7 +57,7 @@ class PanelState:
             timeout=tk.StringVar(root, value="120"),
             poll_interval=tk.StringVar(root, value="0.5"),
             zomboid_path=tk.StringVar(root),
-            theme=tk.StringVar(root, value="light"),
+            theme=tk.StringVar(root, value=initial_theme),
             openai_base_url=tk.StringVar(root, value="https://api.openai.com/v1"),
             openai_key=tk.StringVar(root),
             ollama_base_url=tk.StringVar(root, value="http://127.0.0.1:11434/v1"),

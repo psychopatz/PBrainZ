@@ -322,10 +322,12 @@ def _build_appimage(
     app_run.write_text(
         '#!/bin/sh\n'
         'HERE="$(dirname "$(readlink -f "$0")")"\n'
-        'if [ -n "${APPIMAGE:-}" ]; then\n'
-        '    export PBRAINZ_PORTABLE_ROOT="$(dirname "$(readlink -f "$APPIMAGE")")"\n'
-        'else\n'
-        '    export PBRAINZ_PORTABLE_ROOT="$HERE"\n'
+        'if [ -z "${PBRAINZ_PORTABLE_ROOT:-}" ]; then\n'
+        '    if [ -n "${APPIMAGE:-}" ]; then\n'
+        '        export PBRAINZ_PORTABLE_ROOT="$(dirname "$(readlink -f "$APPIMAGE")")"\n'
+        '    else\n'
+        '        export PBRAINZ_PORTABLE_ROOT="$HERE"\n'
+        '    fi\n'
         'fi\n'
         'exec "$HERE/usr/lib/PBrainZ/PBrainZ" "$@"\n',
         encoding="utf-8",

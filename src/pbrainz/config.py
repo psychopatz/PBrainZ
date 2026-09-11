@@ -1,11 +1,12 @@
 """Application configuration loaded from SQLite and process environment."""
 
+import os
 from functools import lru_cache
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from pbrainz.branding import PRODUCT_NAME
+from pbrainz.branding import DATABASE_ENV, PRODUCT_NAME
 from pbrainz.paths import default_zomboid_path
 
 OPENAI_COMPATIBLE_PROVIDERS = ("openai", "ollama", "lmstudio", "custom", "horde")
@@ -164,11 +165,13 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load the process-wide settings from environment and the local database."""
-    from pbrainz.database import SettingsDatabase
+    from pbrainz.database import SettingsDatabase, legacy_database_candidates
 
     environment_settings = Settings()
     database = SettingsDatabase(environment_settings.database_path)
     database.initialize()
+    if environment_settings.database_path is None and not os.getenv(DATABASE_ENV):
+        database.import_legacy_if_needed(legacy_database_candidates())
     stored = database.load_settings()
     values = environment_settings.model_dump()
     values.update(stored)

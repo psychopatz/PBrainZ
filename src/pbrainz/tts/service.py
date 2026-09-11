@@ -31,6 +31,7 @@ from .models import (
 from .scheduler import SpeechScheduler
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_INSTALL_RETRY_DELAYS = (0.0, 5.0, 15.0)
 
 
 class TTSService:
@@ -73,7 +74,6 @@ class TTSService:
         else:
             self.last_error = self._availability_error()
             LOGGER.warning("TTS is enabled but degraded to text-only: %s", self.last_error)
-        self._schedule_default_install()
 
     async def stop(self) -> None:
         await self._cancel_default_install()
@@ -109,27 +109,6 @@ class TTSService:
             self.last_error = f"Could not save default Piper voice presets: {error}"[:500]
             LOGGER.warning("Could not save default Piper voice presets: %s", error)
 
-    def _schedule_default_install(self) -> None:
-        if self._default_setup_complete:
-            return
-        if self._default_install_task and not self._default_install_task.done():
-            return
-        presets = self.presets.all()
-        first_default_id = next(
-            (
-                model_id
-                for slot, model_id in DEFAULT_TTS_PRESETS
-                if presets.get(slot) and presets[slot].voice_model_id == model_id
-            ),
-            "",
-        )
-        if first_default_id:
-            self._default_install_status = self._default_status(first_default_id)
-        self._default_install_task = asyncio.create_task(
-            self._install_default_voices(), name="pbrainz-tts-default-voices"
-        )
-        self._default_install_task.add_done_callback(self._default_install_finished)
-
     async def _cancel_default_install(self) -> None:
         task = self._default_install_task
         if task and not task.done():
@@ -145,56 +124,156 @@ class TTSService:
             return
         error = task.exception()
         if error is not None:
+            self.last_error = f"Default Piper voice setup failed: {error}"[:500]
+            self._default_install_status = self._default_failure_status(self.last_error)
             LOGGER.warning("Default Piper voice setup failed: %s", error)
+
+    def _default_voice_ids(self) -> tuple[str, ...]:
+        presets = self.presets.all()
+        return tuple(
+            dict.fromkeys(
+                model_id
+                for slot, model_id in DEFAULT_TTS_PRESETS
+                if presets.get(slot) and presets[slot].voice_model_id == model_id
+            )
+        )
+
+    def default_voice_setup_needed(self) -> bool:
+        """Return whether any shipped default voice is not installed yet."""
+
+        default_ids = self._default_voice_ids()
+        return bool(
+            default_ids
+            and any(
+                not (model := self.catalog.models.get(model_id)) or not model.installed
+                for model_id in default_ids
+            )
+        )
+
+    def start_default_install(self) -> dict[str, Any]:
+        """Request the default voice setup after explicit user consent."""
+
+        default_ids = self._default_voice_ids()
+        if not default_ids:
+            raise TTSException("No default Piper voices are configured")
+        if self._default_install_task and not self._default_install_task.done():
+            return self.default_install_status() or self._default_status(default_ids[0])
+        if not self.default_voice_setup_needed():
+            self._default_setup_complete = True
+            self._default_install_status = {
+                **self._default_status(default_ids[0]),
+                "state": "complete",
+                "stage": "Default voices already installed",
+                "completed_bytes": 1,
+                "total_bytes": 1,
+                "progress": 100.0,
+            }
+            return dict(self._default_install_status)
+        self.last_error = None
+        self._default_install_status = self._default_status(default_ids[0])
+        self._default_install_task = asyncio.create_task(
+            self._install_default_voices(), name="pbrainz-tts-default-voices"
+        )
+        self._default_install_task.add_done_callback(self._default_install_finished)
+        return dict(self._default_install_status)
 
     async def _install_default_voices(self) -> None:
         """Install the selected built-ins serially after TTS is enabled."""
 
+        default_ids = self._default_voice_ids()
         try:
-            await self.refresh_catalog()
-            presets = self.presets.all()
-            default_ids = {
-                model_id
-                for slot, model_id in DEFAULT_TTS_PRESETS
-                if presets.get(slot) and presets[slot].voice_model_id == model_id
-            }
-            failures: list[str] = []
-            for _slot, model_id in DEFAULT_TTS_PRESETS:
-                if model_id not in default_ids:
-                    continue
-                self._default_install_status = self._default_status(model_id)
-                model = self.catalog.get(model_id)
-                if model is None:
-                    failures.append(f"{model_id}: not present in the Piper catalog")
-                    continue
-                if model.installed:
-                    continue
-                while self._active_install_job_id:
-                    active_job_id = self._active_install_job_id
-                    await self._wait_for_install_job(active_job_id)
-                    if self._active_install_job_id == active_job_id:
-                        # The install job publishes its terminal state before
-                        # its finally block clears the active-job marker.
-                        await asyncio.sleep(0.05)
-                try:
-                    install = self.start_voice_install(model_id)
-                except TTSException as error:
-                    failures.append(f"{model_id}: {error}")
-                    continue
-                job_id = str(install.get("job_id") or "")
-                if job_id:
-                    await self._wait_for_install_job(job_id)
-                    completed = self._install_jobs.get(job_id, {})
-                    if str(completed.get("state") or "") != "complete":
-                        failures.append(
-                            f"{model_id}: {completed.get('error') or 'installation failed'}"
-                        )
-            self._default_setup_complete = not failures
-            if failures:
-                self.last_error = "Default Piper voice setup incomplete: " + "; ".join(failures)
-                LOGGER.warning(self.last_error)
-        finally:
-            self._default_install_status = None
+            for attempt, delay in enumerate(DEFAULT_INSTALL_RETRY_DELAYS, start=1):
+                if delay:
+                    self._default_install_status = {
+                        **(self._default_install_status or self._default_status(default_ids[0])),
+                        "state": "preparing",
+                        "stage": (
+                            f"Retrying default voice download ({attempt}/"
+                            f"{len(DEFAULT_INSTALL_RETRY_DELAYS)})"
+                        ),
+                    }
+                    await asyncio.sleep(delay)
+                failures = await self._install_default_voice_pass(default_ids)
+                if not failures:
+                    self._default_setup_complete = True
+                    self.last_error = None
+                    self._default_install_status = {
+                        **(self._default_install_status or self._default_status(default_ids[0])),
+                        "state": "complete",
+                        "stage": "Default voices installed",
+                        "completed_bytes": 1,
+                        "total_bytes": 1,
+                        "progress": 100.0,
+                    }
+                    return
+                message = "; ".join(failures)
+                if attempt < len(DEFAULT_INSTALL_RETRY_DELAYS):
+                    LOGGER.warning(
+                        "Default Piper voice setup attempt %d/%d failed: %s",
+                        attempt,
+                        len(DEFAULT_INSTALL_RETRY_DELAYS),
+                        message,
+                    )
+                else:
+                    self._default_setup_complete = False
+                    self.last_error = f"Default Piper voice setup incomplete: {message}"[:500]
+                    self._default_install_status = self._default_failure_status(
+                        self.last_error
+                    )
+                    LOGGER.warning(self.last_error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._default_setup_complete = False
+            self.last_error = f"Default Piper voice setup failed: {error}"[:500]
+            self._default_install_status = self._default_failure_status(self.last_error)
+            LOGGER.exception("Default Piper voice setup failed unexpectedly")
+
+    async def _install_default_voice_pass(self, default_ids: tuple[str, ...]) -> list[str]:
+        await self.refresh_catalog()
+        failures: list[str] = []
+        for model_id in default_ids:
+            self._default_install_status = self._default_status(model_id)
+            model = self.catalog.get(model_id)
+            if model is None:
+                failures.append(f"{model_id}: not present in the Piper catalog")
+                continue
+            if model.installed:
+                continue
+            while self._active_install_job_id:
+                active_job_id = self._active_install_job_id
+                await self._wait_for_install_job(active_job_id)
+                if self._active_install_job_id == active_job_id:
+                    # The install job publishes its terminal state before
+                    # its finally block clears the active-job marker.
+                    await asyncio.sleep(0.05)
+            try:
+                install = self.start_voice_install(model_id)
+            except TTSException as error:
+                failures.append(f"{model_id}: {error}")
+                continue
+            job_id = str(install.get("job_id") or "")
+            if job_id:
+                await self._wait_for_install_job(job_id)
+                completed = self._install_jobs.get(job_id, {})
+                if str(completed.get("state") or "") != "complete":
+                    failures.append(
+                        f"{model_id}: {completed.get('error') or 'installation failed'}"
+                    )
+        return failures
+
+    @staticmethod
+    def _default_failure_status(error: str) -> dict[str, Any]:
+        return {
+            "job_id": "",
+            "voice_model_id": "",
+            "state": "failed",
+            "stage": "Default voice download failed",
+            "completed_bytes": 0,
+            "total_bytes": 0,
+            "progress": 0.0,
+            "error": error[:500],
+        }
 
     @staticmethod
     def _default_status(model_id: str) -> dict[str, Any]:
@@ -270,6 +349,7 @@ class TTSService:
                 await self.scheduler.start()
         if model.id in {model_id for _slot, model_id in DEFAULT_TTS_PRESETS}:
             self._default_setup_complete = False
+            self._default_install_status = None
         return {
             "voice": removed.as_dict(include_download=True),
             "cleared_preset_slots": list(cleared_slots),
@@ -606,6 +686,7 @@ class TTSService:
 
     def status(self) -> dict[str, Any]:
         self.catalog.refresh()
+        default_setup_needed = self.default_voice_setup_needed()
         active = [
             utterance.speaker_npc_uuid
             for runtime in self.scheduler.runtimes.values()
@@ -653,6 +734,7 @@ class TTSService:
                 for model in self.catalog.models.values()
                 if not model.installed and model.model_url and model.config_url
             ),
+            "default_voice_setup_needed": default_setup_needed,
             "presets": [preset.as_dict() for preset in self.presets.all().values()],
             "default_voice_install": self.default_install_status(),
             "loaded_models": list(self.provider.cache.loaded_model_ids),

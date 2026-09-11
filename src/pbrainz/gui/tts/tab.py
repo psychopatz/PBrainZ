@@ -47,6 +47,8 @@ class TTSTab(OutputViewMixin, CatalogViewMixin, PresetsViewMixin):
         self._install_poll_after: str | None = None
         self._install_poll_failures = 0
         self._automatic_install_in_flight = False
+        self._default_install_prompted = False
+        self._default_install_request_in_flight = False
         self._default_install_refresh_after: str | None = None
         self._volume_scale_var = tk.DoubleVar(parent, value=1.0)
         self.enabled = tk.BooleanVar(parent, value=False)
