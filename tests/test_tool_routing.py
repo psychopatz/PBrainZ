@@ -59,6 +59,10 @@ def test_tool_router_selects_identity_tool_for_name_question() -> None:
     )
 
     assert [tool["function"]["name"] for tool in selection.selected] == ["ask_name"]
+    assert selection.diagnostics["selected_candidates"][0]["response_mode"] == (
+        "result_required"
+    )
+    assert selection.diagnostics["retrieval_method"] == "intent_then_lexical"
 
 
 @pytest.mark.parametrize(

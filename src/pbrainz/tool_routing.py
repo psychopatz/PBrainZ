@@ -27,6 +27,7 @@ class ToolCard:
     name: str
     description: str
     tags: tuple[str, ...] = ()
+    response_mode: str = "speak_and_call"
     eligible: bool = True
     reason: str = "eligible"
 
@@ -101,6 +102,7 @@ class ToolRouter:
         )
         selected: list[dict[str, Any]] = []
         selected_names: list[str] = []
+        selected_candidates: list[dict[str, Any]] = []
         used_chars = 0
         for score, _, card in scored:
             serialized_size = len(repr(card.schema))
@@ -113,6 +115,13 @@ class ToolRouter:
                 continue
             selected.append(card.schema)
             selected_names.append(card.name)
+            selected_candidates.append(
+                {
+                    "name": card.name,
+                    "score": round(score, 3),
+                    "response_mode": card.response_mode,
+                }
+            )
             used_chars += serialized_size
             if len(selected) >= self.max_results:
                 break
@@ -123,6 +132,14 @@ class ToolRouter:
                 if card.name in _SAFE_FALLBACK_NAMES:
                     selected.append(card.schema)
                     selected_names.append(card.name)
+                    selected_candidates.append(
+                        {
+                            "name": card.name,
+                            "score": 0.0,
+                            "response_mode": card.response_mode,
+                            "reason": "safe_fallback",
+                        }
+                    )
                     break
         return ToolSelection(
             registered=len(cards),
@@ -133,6 +150,8 @@ class ToolRouter:
                 "eligible": len(eligible),
                 "selected": len(selected),
                 "selected_names": selected_names,
+                "selected_candidates": selected_candidates,
+                "retrieval_method": "intent_then_lexical",
                 "rejected": [
                     {"name": card.name, "reason": card.reason}
                     for card in cards
@@ -163,7 +182,13 @@ class ToolRouter:
             eligible, reason = False, "internal_primitive"
         elif metadata.get("clientOnly") is True or function.get("clientOnly") is True:
             eligible, reason = False, "client_only"
-        return ToolCard(tool, name, description, tags, eligible, reason)
+        result_required = bool(
+            metadata.get("result_required")
+            or function.get("result_required")
+            or name in {"ask_name", "disclose_knowledge"}
+        )
+        response_mode = "result_required" if result_required else "speak_and_call"
+        return ToolCard(tool, name, description, tags, response_mode, eligible, reason)
 
     def _tokens(self, value: str) -> set[str]:
         tokens: set[str] = set()

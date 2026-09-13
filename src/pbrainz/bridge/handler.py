@@ -21,6 +21,7 @@ from pbrainz.semantic_tool_protocol import (
     extract_text_tool_calls,
     is_provider_scaffold,
     is_social_insult,
+    social_reply_repair_needed,
     strip_provider_scaffold,
 )
 from pbrainz.tts import TTSService
@@ -376,6 +377,14 @@ async def complete_and_deliver(
             and (
                 conversation_result.diagnostics.get("empty_response_retry")
                 == "text_only_authorized_tools"
+                or (
+                    conversation_result.diagnostics.get("truncated_response_retry")
+                    == "same_model_text_recovery"
+                    and conversation_result.diagnostics.get(
+                        "provider_authorized_tool_call_count", 0
+                    )
+                    > 0
+                )
                 or conversation_result.diagnostics.get("contextual_response_retry")
                 == "explicit_social_subtype"
             )
@@ -473,9 +482,17 @@ async def complete_and_deliver(
             )
             if fallback_calls:
                 arguments["semantic_tool_calls"] = fallback_calls
-            arguments["response_text"] = npc_fallback_response(
-                request, fallback_calls
-            )
+                # The game can now produce a result-aware reply after it
+                # applies these authoritative semantic actions.  Do not send
+                # generic provider-failure prose alongside them: a non-empty
+                # response would win the presentation race and hide the
+                # actual tool result (for example, "Give me a moment." after
+                # a successful ask_name action).
+                arguments["response_text"] = ""
+            else:
+                arguments["response_text"] = npc_fallback_response(
+                    request, fallback_calls
+                )
             arguments["provider_failure"] = True
             arguments["context_eligible"] = False
     except Exception as error:
@@ -621,7 +638,7 @@ def tool_ack_text(
     if "ask_name" in names:
         return "Sure. Let me introduce myself."
     if "social_react" in names:
-        return "I hear you."
+        return npc_fallback_response(request, semantic_tool_calls)
     if any(name.startswith("order_") for name in names):
         return "All right."
     return "Give me a moment."
@@ -636,6 +653,15 @@ def sanitize_npc_response(
     response = str(response or "").strip()
     has_meta = bool(response and _NPC_META_RESPONSE_RE.search(response))
     has_scaffold = is_provider_scaffold(response)
+    if (
+        response
+        and semantic_tool_calls
+        and social_reply_repair_needed(request_message(request), response)
+    ):
+        # Deterministic social actions no longer spend a second provider call
+        # repairing "I'll check that". Replace only that known non-dialogue
+        # shape with the same bounded local fallback used on provider failure.
+        return npc_fallback_response(request, semantic_tool_calls)
     if not response or not (has_meta or has_scaffold):
         return response
     fallback = npc_fallback_response(request, semantic_tool_calls)

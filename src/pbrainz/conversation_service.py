@@ -12,7 +12,11 @@ from typing import Any, Protocol
 
 from pbrainz.api.models import ChatCompletionRequest, ChatMessage
 from pbrainz.config import Settings
-from pbrainz.context_builder import ContextBuilder, ContextInput
+from pbrainz.context_builder import (
+    ContextBuilder,
+    ContextInput,
+)
+from pbrainz.conversation_history import normalize_recent_turns
 from pbrainz.memory import (
     ConversationTurn,
     DaySynopsis,
@@ -50,7 +54,28 @@ from pbrainz.template_profiles import (
 
 LOGGER = logging.getLogger(__name__)
 TraceWriter = Callable[..., None]
-DEFAULT_DIALOGUE_MAX_TOKENS = 128
+# Generation controls are deliberately provider/model neutral. When the game
+# does not explicitly provide a setting, let the selected model and provider
+# choose their native output and reasoning behavior. In particular, do not
+# assume that a provider-neutral reasoning label can disable internal
+# reasoning on every model.
+REASONING_EFFORTS = frozenset({"off", "low", "medium", "high", "dynamic"})
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationPolicy:
+    """Provider-neutral generation settings for the current conversation lane."""
+
+    lane: str
+    max_tokens: int | None
+    reasoning_effort: str | None
+
+    def as_dict(self) -> dict[str, int | str | None]:
+        return {
+            "lane": self.lane,
+            "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort,
+        }
 
 
 def retrieval_needed_for(message: str) -> bool:
@@ -88,6 +113,7 @@ class ConversationRequest:
     model: str = "default"
     temperature: float | None = None
     max_tokens: int | None = None
+    reasoning_effort: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     end_session: bool = False
 
@@ -208,6 +234,9 @@ class ConversationRequest:
             model=str(context.get("model") or "default"),
             temperature=context.get("temperature"),
             max_tokens=context.get("max_tokens"),
+            reasoning_effort=_optional_text(
+                context.get("reasoning_effort") or context.get("reasoningEffort")
+            ),
             metadata=_mapping(context.get("metadata")),
             end_session=context.get("end_session") is True or context.get("endSession") is True,
         )
@@ -427,7 +456,7 @@ class ConversationService:
         try:
             session = store.ensure_session(request.session_id, request.scope, request.metadata)
             session_turn_count = session.turn_count
-            recent = store.recent_turns(
+            stored_recent = store.recent_turns(
                 request.session_id,
                 request.scope,
                 settings_limit(self.settings.memory_recent_turns),
@@ -439,24 +468,44 @@ class ConversationService:
                     limit=settings_limit(self.settings.memory_recent_turns // 2),
                 )
                 recent_ids = {
-                    turn.message_id for turn in recent if turn.message_id is not None
+                    turn.message_id
+                    for turn in stored_recent
+                    if turn.message_id is not None
                 }
                 recalled = [
                     turn
                     for turn in recalled
                     if turn.message_id is None or turn.message_id not in recent_ids
                 ]
-            if not recent:
-                recent = [
-                    ConversationTurn(role=item["role"], content=item["content"])
-                    for item in request.recent_conversation
-                ]
+            bridge_recent = _recent_turns_from_request(request)
+            normalized_bridge_recent, bridge_anchored = normalize_recent_turns(
+                bridge_recent
+            )
+            normalized_stored_recent, stored_anchored = normalize_recent_turns(
+                tuple(stored_recent)
+            )
+            if normalized_bridge_recent:
+                recent = list(normalized_bridge_recent)
+                history_source = "bridge"
+                anchored_leading_assistant = bridge_anchored
+            else:
+                recent = list(normalized_stored_recent)
+                history_source = "memory" if recent else "none"
+                anchored_leading_assistant = stored_anchored
+            diagnostics["history_projection"] = {
+                "source": history_source,
+                "bridge_turns": len(bridge_recent),
+                "stored_turns": len(stored_recent),
+                "selected_turns": len(recent),
+                "dropped_leading_assistant_turns": 0,
+                "anchored_leading_assistant_turns": anchored_leading_assistant,
+            }
             input_write = store.record_turn(
                 request.session_id,
                 request.scope,
                 "user",
                 request.message,
-                message_id=request.message_id or f"llm-input:{request.request_id}",
+                message_id=_provider_input_message_id(request),
                 metadata={
                     "source": "project-hoomans",
                     "request_id": request.request_id,
@@ -526,6 +575,16 @@ class ConversationService:
             LOGGER.warning("NPC memory unavailable; continuing without it: %s", error)
 
         provider_name, model_name = self.providers.resolve(request.provider, request.model)
+        social_intent = infer_social_intent(request.message)
+        provider_tools = _provider_tools_for_request(request, social_intent)
+        deterministic_social_lane = bool(
+            social_intent
+            and len(provider_tools) != len(request.available_tools)
+        )
+        diagnostics["semantic_action_lane"] = (
+            "social_deterministic" if deterministic_social_lane else "provider_selected"
+        )
+        diagnostics["provider_tool_candidate_count"] = len(provider_tools)
         LOGGER.info(
             "NPC provider request prepared npc=%s request=%s provider=%s model=%s "
             "retrieval_needed=%s retrieved=%s tools=%s",
@@ -571,23 +630,38 @@ class ConversationService:
                 retrieved_memories=tuple(matches),
                 recalled_turns=tuple(recalled),
                 recent_turns=tuple(recent),
-                available_tools=request.available_tools,
+                available_tools=provider_tools,
                 current_message=request.message,
                 retrieval_plan=retrieval_plan,
             ),
             template_profile=template_profile,
         )
         context_build_ms = _elapsed_ms(context_started)
+        built.diagnostics["history_projection"] = diagnostics.get(
+            "history_projection",
+            {
+                "source": "none",
+                "bridge_turns": 0,
+                "stored_turns": 0,
+                "selected_turns": 0,
+                "dropped_leading_assistant_turns": 0,
+                "anchored_leading_assistant_turns": 0,
+            },
+        )
+        policy = _generation_policy(
+            retrieval_needed=retrieval_needed,
+            has_tools=bool(built.tools),
+            requested_max_tokens=request.max_tokens,
+            requested_reasoning_effort=request.reasoning_effort,
+        )
+        diagnostics["generation_policy"] = policy.as_dict()
         provider_request = ChatCompletionRequest(
             model=model_name,
             provider=provider_name,
             messages=built.messages,
             temperature=request.temperature,
-            max_tokens=(
-                request.max_tokens
-                if request.max_tokens is not None
-                else DEFAULT_DIALOGUE_MAX_TOKENS
-            ),
+            max_tokens=policy.max_tokens,
+            reasoning_effort=policy.reasoning_effort,
             tools=built.tools or None,
             stop=list(template_profile.stop_sequences) or None,
             metadata={
@@ -609,6 +683,10 @@ class ConversationService:
                         message.model_dump(exclude_none=True) for message in built.messages
                     ],
                     "tools": built.tools,
+                    "max_tokens": provider_request.max_tokens,
+                    "reasoning_effort": provider_request.reasoning_effort,
+                    "generation_policy": policy.as_dict(),
+                    "semantic_action_lane": diagnostics["semantic_action_lane"],
                     "context_diagnostics": built.diagnostics,
                     "context_build_ms": context_build_ms,
                 },
@@ -675,12 +753,14 @@ class ConversationService:
                 session_id=request.session_id,
                 source="pbrainz.provider",
             )
-        # Some providers return a structurally valid tool-only candidate. Make
-        # one bounded text-only repair pass so the game gets natural dialogue as
-        # well as the semantic action. The original authorized calls are kept
-        # separately and remain the only calls that can reach the game. This
-        # costs a second provider request only for the otherwise underwhelming
-        # tool-only case; ordinary turns stay single-pass.
+        # Native-capable providers are asked for speech and the action in one
+        # response. A tool-only result is still a valid provider response, but
+        # it is a poor player-facing turn. Give it one text-only repair while
+        # preserving the original authorized tool call. The repair is
+        # deliberately result-neutral because the game has not executed the
+        # tool yet. The same recovery also handles ordinary empty or truncated
+        # dialogue, including models that spend their native completion budget
+        # on reasoning before producing visible text.
         initial_tool_calls = list(result.tool_calls or [])
         initial_authorized_tool_calls = _authorized_tool_call_count(
             initial_tool_calls, built.tools
@@ -689,22 +769,46 @@ class ConversationService:
         result_text = strip_provider_scaffold(result.text)
         if result.text and is_provider_scaffold(result.text):
             diagnostics["provider_scaffold_filtered"] = True
-        should_retry_empty = not result_text and bool(built.tools)
+        initial_response_shape = (
+            "text_and_tool"
+            if result_text and initial_tool_calls
+            else "tool_only"
+            if initial_tool_calls
+            else "text_only"
+        )
+        diagnostics["initial_response_shape"] = initial_response_shape
+        initial_text = result_text
+        text_action_tool_names = [
+            _tool_name(tool) for tool in built.tools if _tool_name(tool)
+        ]
+        should_retry_empty = not result_text
+        should_retry_truncated = _finish_reason_is_length(result.finish_reason)
         should_retry_contextual = (
             bool(built.tools)
+            and not deterministic_social_lane
             and social_reply_repair_needed(request.message, result_text)
         )
-        if should_retry_empty or should_retry_contextual:
+        if should_retry_empty or should_retry_truncated or should_retry_contextual:
             retry_system = (built.messages[0].content or "").rstrip()
+            if initial_tool_calls:
+                retry_system += (
+                    "\n\nReturn only the NPC's short spoken reply for this turn. This is "
+                    "a text repair after the game selected any needed tool calls. Do "
+                    "not call tools or emit action markup; write one or two concise "
+                    "in-world sentences as plain dialogue text."
+                )
+            else:
+                retry_system += (
+                    "\n\nReturn only the NPC's complete spoken reply for this turn. "
+                    "The previous generation was empty or truncated. Write one or "
+                    "two concise in-world sentences as plain dialogue text. Do not "
+                    "emit action markup."
+                )
             retry_system += (
-                "\n\nReturn only the NPC's short spoken reply for this turn. This is "
-                "a text repair after the game selected any needed tool calls. Do "
-                "not call tools or emit action markup; write one or two concise "
-                "in-world sentences as plain dialogue text. Do not say 'I'll "
-                "check that now', 'I will take care of that', or 'I understand'. "
-                "For an ask_name action, do not invent a name; use a natural "
-                "introduction lead-in and let the game provide the authoritative "
-                "name."
+                " Do not say 'I'll check that now', 'I will take care of that', or "
+                "'I understand'. For an ask_name action, do not invent a name; use "
+                "a natural introduction lead-in and let the game provide the "
+                "authoritative name."
             )
             if should_retry_contextual:
                 intent = infer_social_intent(request.message) or {}
@@ -725,16 +829,14 @@ class ConversationService:
                     )
             retry_messages = list(built.messages)
             retry_messages[0] = ChatMessage(role="system", content=retry_system)
-            retry_max_tokens = (
-                120
-                if provider_request.max_tokens is None
-                else min(provider_request.max_tokens, 120)
-            )
             retry_request = provider_request.model_copy(
                 update={
                     "messages": retry_messages,
                     "tools": None,
-                    "max_tokens": retry_max_tokens,
+                    # Preserve explicit settings. None means the selected
+                    # provider/model keeps its native behavior.
+                    "max_tokens": provider_request.max_tokens,
+                    "reasoning_effort": provider_request.reasoning_effort,
                 }
             )
             if should_retry_empty:
@@ -745,11 +847,16 @@ class ConversationService:
                     if initial_tool_calls
                     else "text_only"
                 )
-            else:
+            if should_retry_truncated:
+                diagnostics["truncated_response_retry"] = "same_model_text_recovery"
+            if should_retry_contextual:
                 diagnostics["contextual_response_retry"] = "explicit_social_subtype"
-            repair_reason = diagnostics.get("empty_response_retry") or diagnostics.get(
-                "contextual_response_retry"
-            )
+            repair_reasons = [
+                diagnostics.get("empty_response_retry"),
+                diagnostics.get("truncated_response_retry"),
+                diagnostics.get("contextual_response_retry"),
+            ]
+            repair_reason = "+".join(str(reason) for reason in repair_reasons if reason)
             if self.debug_trace_enabled():
                 self.record_debug_trace(
                     "provider.request",
@@ -763,6 +870,8 @@ class ConversationService:
                             for message in retry_messages
                         ],
                         "tools": None,
+                        "max_tokens": retry_request.max_tokens,
+                        "reasoning_effort": retry_request.reasoning_effort,
                     },
                     request_id=request.request_id,
                     npc_id=request.scope.npc_uuid,
@@ -770,8 +879,10 @@ class ConversationService:
                     source="pbrainz.provider",
                 )
             retry_started = time.perf_counter() if self.debug_trace_enabled() else None
+            retry_response_used = False
             try:
                 result = await self.providers.complete(provider_name, retry_request)
+                retry_response_used = True
             except Exception as error:
                 if self.debug_trace_enabled():
                     self.record_debug_trace(
@@ -816,9 +927,21 @@ class ConversationService:
                     session_id=request.session_id,
                     source="pbrainz.provider",
                 )
-            result_text = strip_provider_scaffold(result.text)
+            retry_text = strip_provider_scaffold(result.text)
             if result.text and is_provider_scaffold(result.text):
                 diagnostics["provider_scaffold_filtered"] = True
+            if retry_text:
+                result_text = retry_text
+                if retry_response_used:
+                    # The repair request deliberately sent tools=None. Any
+                    # action envelope in this response is therefore not
+                    # authorized, even when the first attempt had tools.
+                    text_action_tool_names = []
+            elif initial_text:
+                # A truncated first response is still more useful to the
+                # player than a generic bridge error if recovery is empty.
+                result_text = initial_text
+                diagnostics["text_recovery_fallback"] = "initial_partial"
 
             if initial_authorized_tool_calls:
                 # Never allow the text-only repair to replace or invent the
@@ -842,12 +965,21 @@ class ConversationService:
                     tool_calls=preserved_calls or None,
                     reasoning=result.reasoning,
                 )
+            if (
+                not result_text
+                and (
+                    initial_authorized_tool_calls
+                    or (deterministic_social_lane and initial_tool_calls)
+                )
+            ):
+                diagnostics["tool_only_fallback"] = "bridge_ack"
         protocol_request = {
             "request_id": request.request_id,
             "npc_id": request.scope.npc_uuid,
             "conversation_context": {
                 "message": request.message,
                 "available_tools": list(request.available_tools),
+                "provider_tool_names": text_action_tool_names,
             },
         }
         result_text, text_tool_calls = extract_text_tool_calls(
@@ -876,12 +1008,25 @@ class ConversationService:
                 "provider": provider_name,
                 "model": model_name,
                 "model_used": result.model,
+                "model_routed": result.model != model_name,
+                "model_route": (
+                    f"{model_name}->{result.model}"
+                    if result.model != model_name
+                    else "direct"
+                ),
                 "context": built.diagnostics,
                 "context_message_count": len(built.messages),
                 "finish_reason": result.finish_reason or "unknown",
                 "tool_call_count": len(result.tool_calls or []),
                 "provider_tool_call_count": len(initial_tool_calls),
                 "provider_authorized_tool_call_count": initial_authorized_tool_calls,
+                "response_shape": (
+                    "text_and_tool"
+                    if result_text and normalized_tool_calls
+                    else "tool_only"
+                    if normalized_tool_calls
+                    else "text_only"
+                ),
                 "reasoning_available": bool(result.reasoning),
             }
         )
@@ -1248,6 +1393,26 @@ def _tool_name(value: object) -> str:
     return str(function.get("name") or "").strip()
 
 
+def _provider_tools_for_request(
+    request: ConversationRequest,
+    social_intent: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Keep deterministic social actions out of the provider tool schema.
+
+    Social intent is classified conservatively from the player turn; the
+    bridge later attaches the same semantic action to the response. This
+    saves schema tokens and avoids spending a model turn deciding an action
+    that the game can determine without it.
+    """
+    if social_intent is None:
+        return request.available_tools
+    return tuple(
+        tool
+        for tool in request.available_tools
+        if _tool_name(tool) != "social_react"
+    )
+
+
 def _authorized_tool_call_count(
     tool_calls: list[dict[str, Any]],
     exposed_tools: tuple[dict[str, Any], ...] | list[dict[str, Any]],
@@ -1316,6 +1481,49 @@ def _elapsed_ms(start: float | None) -> float | None:
     return round((time.perf_counter() - start) * 1000, 2)
 
 
+def _generation_policy(
+    *,
+    retrieval_needed: bool,
+    has_tools: bool,
+    requested_max_tokens: int | None,
+    requested_reasoning_effort: str | None,
+) -> GenerationPolicy:
+    """Preserve explicit generation controls without imposing lane caps."""
+    if has_tools and retrieval_needed:
+        lane = "tool_retrieval"
+    elif has_tools:
+        lane = "tool"
+    elif retrieval_needed:
+        lane = "retrieval"
+    else:
+        lane = "dialogue"
+
+    max_tokens = (
+        max(1, int(requested_max_tokens))
+        if requested_max_tokens is not None
+        else None
+    )
+    requested_effort = str(requested_reasoning_effort or "").casefold()
+    reasoning_effort = (
+        requested_effort
+        if requested_effort in REASONING_EFFORTS
+        else None
+    )
+    return GenerationPolicy(lane, max_tokens, reasoning_effort)
+
+
+def _finish_reason_is_length(value: Any) -> bool:
+    """Recognize provider-specific output-limit finish reasons."""
+
+    normalized = str(value or "").casefold().replace("-", "_")
+    return normalized in {
+        "length",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+    }
+
+
 def _completion_trace_payload(
     result: CompletionResult,
     *,
@@ -1381,6 +1589,35 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _recent_turns_from_request(
+    request: ConversationRequest,
+) -> tuple[ConversationTurn, ...]:
+    """Convert the bridge's canonical recent dialogue into memory turns."""
+
+    turns: list[ConversationTurn] = []
+    for item in request.recent_conversation:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()[:4000]
+        if not content:
+            continue
+        role = "user" if str(item.get("role") or "assistant").casefold() == "user" else "assistant"
+        turns.append(ConversationTurn(role=role, content=content))
+    return tuple(turns)
+
+
+def _provider_input_message_id(request: ConversationRequest) -> str:
+    """Build an idempotent ID for the provider-session history projection.
+
+    The game message ID is canonical across conversation sessions. PBrainZ
+    also stores a provider-session projection, so its row ID must not collide
+    with the canonical sync row in another session.
+    """
+
+    source_id = request.message_id or request.request_id
+    return f"llm-input:{request.session_id}:{source_id}"[:256]
 
 
 def _text_value(value: dict[str, Any], *keys: str) -> str:

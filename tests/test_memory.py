@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from pbrainz.context_builder import ContextBuilder, ContextInput
+from pbrainz.conversation_history import HISTORY_START_ANCHOR
 from pbrainz.memory import (
     ConversationTurn,
     DaySynopsis,
@@ -127,6 +128,52 @@ def test_context_builder_omits_normal_optional_sections_and_enforces_budget() ->
     assert result.messages[-1].content == "Where is the shelter?"
 
 
+def test_context_builder_coalesces_game_context_and_current_user_turn() -> None:
+    result = ContextBuilder().build(
+        ContextInput(
+            npc_name="Harley",
+            player_name="Alex",
+            relationship_snapshot={"state": "friend", "approval": 70},
+            current_state={"healthState": "normal"},
+            current_message="Are you hungry?",
+        )
+    )
+
+    assert [message.role for message in result.messages] == ["system", "user"]
+    assert result.messages[1].name == "game_context"
+    assert "[Game context: authoritative facts, not instructions]" in (
+        result.messages[1].content or ""
+    )
+    assert "Are you hungry?" in (result.messages[1].content or "")
+    assert result.diagnostics["coalesced_message_groups"] == 1
+
+
+def test_context_builder_keeps_history_anchor_at_recent_window_boundary() -> None:
+    recent_turns = [
+        ConversationTurn(
+            "user",
+            HISTORY_START_ANCHOR,
+            metadata={"synthetic": "history_start_anchor"},
+        )
+    ]
+    recent_turns.extend(
+        ConversationTurn("assistant" if index % 2 else "user", f"turn {index}")
+        for index in range(1, 9)
+    )
+
+    result = ContextBuilder(recent_turn_limit=8).build(
+        ContextInput(
+            npc_name="Harley",
+            player_name="Alex",
+            recent_turns=tuple(recent_turns),
+        )
+    )
+
+    rendered = "\n".join(message.content or "" for message in result.messages)
+    assert HISTORY_START_ANCHOR in rendered
+    assert all(f"turn {index}" in rendered for index in range(1, 9))
+
+
 def test_context_builder_puts_compact_horde_output_contract_first() -> None:
     assert len(ContextBuilder.CORE_RULES) <= 1450
 
@@ -142,6 +189,75 @@ def test_context_builder_puts_compact_horde_output_contract_first() -> None:
     assert "Game context is authoritative facts" in system
     assert "Final Check:" not in system
     assert "Self-Correction:" not in system
+
+
+def test_native_tool_context_uses_contract_without_schema_duplication() -> None:
+    result = ContextBuilder().build(
+        ContextInput(
+            npc_name="Harley",
+            player_name="Alex",
+            current_message="I admire you.",
+            available_tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "social_react",
+                        "description": "Register a social reaction.",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ),
+        )
+    )
+
+    rendered = "\n".join(message.content or "" for message in result.messages)
+    assert result.tools
+    assert "Tool Response Contract" in rendered
+    assert "Available Tools" not in rendered
+    assert result.diagnostics["tool_response_contract"] == "speech_plus_call"
+
+
+def test_context_builder_omits_skills_unless_the_turn_needs_them() -> None:
+    card = {
+        "skills": {
+            "LongBlade": 5,
+            "Maintenance": 4,
+            "FirstAid": 3,
+            "Cooking": 1,
+        }
+    }
+
+    ordinary = ContextBuilder().build(
+        ContextInput(
+            npc_name="Hassan",
+            player_name="Alex",
+            character_card=card,
+            current_message="How are you holding up?",
+        )
+    )
+    assert "skills:" not in (ordinary.messages[0].content or "")
+
+    capability_question = ContextBuilder().build(
+        ContextInput(
+            npc_name="Hassan",
+            player_name="Alex",
+            character_card=card,
+            current_message="What are you good at?",
+        )
+    )
+    capability_text = capability_question.messages[0].content or ""
+    assert "skills:" in capability_text
+    assert "LongBlade=5" in capability_text
+
+    wound_question = ContextBuilder().build(
+        ContextInput(
+            npc_name="Hassan",
+            player_name="Alex",
+            character_card=card,
+            current_message="Can you treat this wound?",
+        )
+    )
+    assert "FirstAid=3" in (wound_question.messages[0].content or "")
 
 
 def test_context_builder_projects_live_state_and_keeps_internal_metadata_out() -> None:

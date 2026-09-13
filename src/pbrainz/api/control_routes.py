@@ -791,6 +791,7 @@ async def mock_chat(request: Request, body: MockChatRequest) -> dict[str, object
         model=body.model,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        reasoning_effort=body.reasoning_effort,
         metadata={"source": "pbrainz-mock-chat", "participant_ids": sorted(participant_ids)},
         end_session=body.end_session,
     )

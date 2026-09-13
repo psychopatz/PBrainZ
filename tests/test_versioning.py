@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -102,3 +103,65 @@ def test_release_builder_rejects_private_runtime_data(tmp_path) -> None:
 
     with pytest.raises(SystemExit, match="private runtime data"):
         build_release._ensure_release_output_is_safe(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("comm", "args", "expected"),
+    [
+        ("PBrainZ", "", True),
+        ("PBrainZ-0.1.18-x86_64.AppImage", "", True),
+        ("python", "/usr/bin/python -m pbrainz", True),
+        ("python", "/home/user/Projects/PBrainZ/scripts/build_release.py", False),
+        ("bash", "bash -lc 'echo PBrainZ'", False),
+    ],
+)
+def test_release_builder_matches_only_pbrainz_processes(
+    comm: str, args: str, expected: bool
+) -> None:
+    assert build_release._is_pbrainz_process(comm, args) is expected
+
+
+def test_release_builder_stops_existing_process_before_returning(tmp_path, monkeypatch) -> None:
+    states = iter(([1234], []))
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(build_release, "_running_pbrainz_pids", lambda: list(next(states)))
+    if os.name == "nt":
+        monkeypatch.setattr(
+            build_release,
+            "_taskkill",
+            lambda pid, force: signals.append((pid, int(force))),
+        )
+    else:
+        monkeypatch.setattr(
+            build_release.os,
+            "kill",
+            lambda pid, value: signals.append((pid, value)),
+        )
+
+    stopped = build_release._close_running_instances(timeout=0.1)
+
+    assert stopped == (1234,)
+    if os.name != "nt":
+        assert signals == [(1234, build_release.signal.SIGTERM)]
+
+
+def test_release_builder_restarts_artifact_detached(tmp_path, monkeypatch) -> None:
+    artifact = tmp_path / "PBrainZ-0.1.18-x86_64.AppImage"
+    artifact.write_bytes(b"test artifact")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(build_release.subprocess, "Popen", fake_popen)
+
+    build_release._restart_artifact(artifact)
+
+    assert calls[0][0] == [str(artifact)]
+    assert calls[0][1]["cwd"] == artifact.parent
+    if os.name != "nt":
+        assert calls[0][1]["start_new_session"] is True

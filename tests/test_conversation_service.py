@@ -55,6 +55,20 @@ class EmptyThenTextProviders:
         return CompletionResult(request.model, "I am here.")
 
 
+class TruncatedThenTextProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        self.requests.append((provider, request))
+        if len(self.requests) == 1:
+            return CompletionResult(request.model, "I was just", finish_reason="length")
+        return CompletionResult(request.model, "I was just thinking about resting.")
+
+
 class AuthorizedToolOnlyThenTextProviders:
     def __init__(self) -> None:
         self.requests = []
@@ -82,6 +96,31 @@ class AuthorizedToolOnlyThenTextProviders:
         return CompletionResult(request.model, "You have my respect.")
 
 
+class CombinedTextAndToolProviders:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        self.requests.append((provider, request))
+        return CompletionResult(
+            request.model,
+            "You have my respect.",
+            finish_reason="tool_calls",
+            tool_calls=[
+                {
+                    "id": "social-call",
+                    "function": {
+                        "name": "social_react",
+                        "arguments": '{"kind":"admire"}',
+                    },
+                }
+            ],
+        )
+
+
 class ExplicitSocialGenericThenTextProviders:
     def __init__(self) -> None:
         self.requests = []
@@ -91,22 +130,19 @@ class ExplicitSocialGenericThenTextProviders:
 
     async def complete(self, provider, request):
         self.requests.append((provider, request))
-        if len(self.requests) == 1:
-            return CompletionResult(
-                request.model,
-                "I'll check that now.",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    {
-                        "id": "sexual-call",
-                        "function": {
-                            "name": "social_react",
-                            "arguments": '{"kind":"insult"}',
-                        },
-                    }
-                ],
-            )
         return CompletionResult(request.model, "No. Back off.")
+
+
+class UnselectedTextActionProviders:
+    def resolve(self, provider, model):
+        return provider or "custom", model if model not in {"default", "auto"} else "fake-model"
+
+    async def complete(self, provider, request):
+        return CompletionResult(
+            request.model,
+            'I live nearby. <projecthoomans-action>{"name":"ask_name",'
+            '"arguments":{}}</projecthoomans-action>',
+        )
 
 
 class UnknownToolThenTextProviders:
@@ -245,7 +281,7 @@ async def test_first_meeting_memory_is_added_to_rag_context(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_conversation_uses_bounded_default_dialogue_budget(tmp_path) -> None:
+async def test_conversation_leaves_default_generation_to_selected_model(tmp_path) -> None:
     providers = FakeProviders()
     settings = Settings(
         database_path=str(tmp_path / "settings.db"),
@@ -264,7 +300,141 @@ async def test_conversation_uses_bounded_default_dialogue_budget(tmp_path) -> No
         )
     )
 
-    assert providers.requests[0][1].max_tokens == 128
+    assert providers.requests[0][1].max_tokens is None
+    assert providers.requests[0][1].reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_history_replaces_partial_provider_session_history(tmp_path) -> None:
+    providers = FakeProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    identity = _memory_identity("world-one")
+    scope = MemoryScope(identity.world_uuid, "player-one", "npc-one")
+    store = service._store(identity)
+    store.ensure_session("session-one", scope)
+    store.add_turn("session-one", scope, "assistant", "Partial stored response.")
+
+    result = await service.complete(
+        _conversation_request(
+            "bridge-history",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "Good.",
+            recent_conversation=(
+                {"role": "assistant", "content": "Older orphan response."},
+                {"role": "user", "content": "Are you still there?"},
+                {"role": "assistant", "content": "I am here."},
+            ),
+        )
+    )
+
+    request = providers.requests[0][1]
+    assert [message.role for message in request.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    rendered = "\n".join(message.content or "" for message in request.messages)
+    assert "Partial stored response." not in rendered
+    assert "Older orphan response." in rendered
+    assert "Conversation history begins with an NPC reply" in rendered
+    assert result.diagnostics["history_projection"] == {
+        "source": "bridge",
+        "bridge_turns": 3,
+        "stored_turns": 1,
+        "selected_turns": 4,
+        "dropped_leading_assistant_turns": 0,
+        "anchored_leading_assistant_turns": 1,
+    }
+    assert request.max_tokens is None
+    assert request.reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_provider_history_input_projection_does_not_collide_with_canonical_id(
+    tmp_path,
+) -> None:
+    providers = FakeProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    canonical = {
+        "messageID": "conversation-one:player-1",
+        "saveUUID": "world-one",
+        "worldMode": "multiplayer",
+        "serverInstanceId": "test-server",
+        "serverWorldGeneration": "world-one",
+        "conversationID": "conversation-one",
+        "playerUUID": "player-one",
+        "npcUUID": "npc-one",
+        "speakerID": "player-one",
+        "speakerName": "Alex",
+        "speakerKind": "player",
+        "text": "Hello there.",
+    }
+    service.record_message(canonical)
+
+    identity = _memory_identity("world-one")
+    scope = MemoryScope(identity.world_uuid, "player-one", "npc-one")
+    await service.complete(
+        _conversation_request(
+            "provider-projection",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "pnc-session-one",
+            "Hello there.",
+            message_id=canonical["messageID"],
+        )
+    )
+
+    turns = service._store(identity).recent_turns("pnc-session-one", scope, 8)
+    assert [turn.role for turn in turns] == ["user", "assistant"]
+    assert turns[0].message_id == (
+        "llm-input:pnc-session-one:conversation-one:player-1"
+    )
+    assert turns[0].metadata["canonical_message_id"] == canonical["messageID"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_dialogue_retries_same_model_without_imposed_limits(tmp_path) -> None:
+    providers = TruncatedThenTextProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+
+    result = await service.complete(
+        _conversation_request(
+            "truncated-dialogue",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "What do you mean?",
+        )
+    )
+
+    assert result.completion.text == "I was just thinking about resting."
+    assert result.diagnostics["truncated_response_retry"] == "same_model_text_recovery"
+    assert len(providers.requests) == 2
+    assert providers.requests[0][1].model == providers.requests[1][1].model == "fake-model"
+    assert providers.requests[0][1].max_tokens is None
+    assert providers.requests[1][1].max_tokens is None
+    assert providers.requests[0][1].reasoning_effort is None
+    assert providers.requests[1][1].reasoning_effort is None
 
 
 @pytest.mark.asyncio
@@ -448,7 +618,40 @@ async def test_empty_provider_candidate_retries_without_tools(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_authorized_tool_only_candidate_gets_text_repair_without_losing_tool(
+async def test_unselected_text_action_is_not_replayed(tmp_path) -> None:
+    providers = UnselectedTextActionProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    result = await service.complete(
+        _conversation_request(
+            "unselected-text-action",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "Where do you live?",
+            available_tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_name",
+                        "description": "Ask the NPC to say their name.",
+                    },
+                },
+            ),
+        )
+    )
+
+    assert result.completion.text == "I live nearby."
+    assert result.completion.tool_calls is None
+    assert result.diagnostics["context"]["tool_routing"]["sent"] == 0
+
+
+@pytest.mark.asyncio
+async def test_authorized_tool_only_candidate_gets_dialogue_repair(
     tmp_path,
 ) -> None:
     providers = AuthorizedToolOnlyThenTextProviders()
@@ -460,6 +663,48 @@ async def test_authorized_tool_only_candidate_gets_text_repair_without_losing_to
     result = await service.complete(
         _conversation_request(
             "repair-authorized-tool",
+            "world-one",
+            "player-one",
+            "npc-one",
+            "session-one",
+            "Where are you?",
+            available_tools=(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "social_react",
+                        "description": "React socially.",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ),
+        )
+    )
+
+    assert result.completion.text == "You have my respect."
+    assert result.completion.tool_calls[0]["function"]["name"] == "social_react"
+    assert result.diagnostics["initial_response_shape"] == "tool_only"
+    assert result.diagnostics["empty_response_retry"] == "text_only_authorized_tools"
+    assert "tool_only_fallback" not in result.diagnostics
+    assert len(providers.requests) == 2
+    assert providers.requests[0][1].max_tokens is None
+    assert providers.requests[0][1].reasoning_effort is None
+    assert providers.requests[1][1].tools is None
+    assert providers.requests[1][1].max_tokens is None
+    assert providers.requests[1][1].reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_native_provider_can_return_dialogue_and_tool_in_one_turn(tmp_path) -> None:
+    providers = CombinedTextAndToolProviders()
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        bridge_required=False,
+    )
+    service = ConversationService(settings, providers)
+    result = await service.complete(
+        _conversation_request(
+            "combined-tool-turn",
             "world-one",
             "player-one",
             "npc-one",
@@ -480,14 +725,13 @@ async def test_authorized_tool_only_candidate_gets_text_repair_without_losing_to
 
     assert result.completion.text == "You have my respect."
     assert result.completion.tool_calls[0]["function"]["name"] == "social_react"
-    assert result.diagnostics["empty_response_retry"] == "text_only_authorized_tools"
-    assert len(providers.requests) == 2
-    assert providers.requests[1][1].tools is None
-    assert providers.requests[1][1].max_tokens == 120
+    assert result.diagnostics["initial_response_shape"] == "text_and_tool"
+    assert result.diagnostics["response_shape"] == "text_and_tool"
+    assert len(providers.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_explicit_social_generic_reply_gets_one_contextual_repair(
+async def test_explicit_social_uses_dialogue_only_and_semantic_action(
     tmp_path,
 ) -> None:
     providers = ExplicitSocialGenericThenTextProviders()
@@ -518,10 +762,11 @@ async def test_explicit_social_generic_reply_gets_one_contextual_repair(
     )
 
     assert result.completion.text == "No. Back off."
-    assert result.completion.tool_calls[0]["function"]["name"] == "social_react"
-    assert result.diagnostics["contextual_response_retry"] == "explicit_social_subtype"
-    assert len(providers.requests) == 2
-    assert providers.requests[1][1].tools is None
+    assert result.completion.tool_calls[0]["name"] == "social_react"
+    assert result.diagnostics["semantic_action_lane"] == "social_deterministic"
+    assert "contextual_response_retry" not in result.diagnostics
+    assert len(providers.requests) == 1
+    assert providers.requests[0][1].tools is None
 
 
 @pytest.mark.asyncio
@@ -603,8 +848,10 @@ async def test_consolidation_runs_when_failed_turn_crosses_boundary(tmp_path) ->
     )
 
     assert first.completion.text == "The plan still stands."
-    assert failed.diagnostics["empty_response"] is True
-    assert recovered.diagnostics["consolidated"] is True
+    assert failed.completion.text == "The plan still stands."
+    assert failed.diagnostics["empty_response_retry"] == "text_only"
+    assert failed.diagnostics["consolidated"] is True
+    assert recovered.diagnostics["consolidated"] is False
     assert service._store(identity).stats()["memory_count"] >= 1
 
 

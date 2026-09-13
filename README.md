@@ -186,6 +186,11 @@ The Windows build produces a single `.exe`. The Linux build produces an
 AppImage and downloads the official `appimagetool` automatically when needed.
 Pushing a `v*` tag runs both builds through
 `.github/workflows/release.yml` and attaches the artifacts to a GitHub Release.
+Local builds stop exact running PBrainZ executables or AppImages before
+freezing, then replace the artifact atomically. Pass `--keep-running` to opt
+out, or add `--restart` to launch the newly built artifact after a successful
+build. For example: `python3 scripts/build_release.py --target appimage
+--bump none --restart`.
 The frozen GUI artifacts are windowed applications: Windows does not open a
 companion command prompt, and the Windows executable uses the checked-in
 PBrainZ icon resource. The release builder refuses to use an output directory

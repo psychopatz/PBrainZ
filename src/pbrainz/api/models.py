@@ -36,6 +36,9 @@ class ChatCompletionRequest(BaseModel):
     top_p: float | None = Field(default=None, gt=0, le=1)
     max_tokens: int | None = Field(default=None, ge=1)
     max_completion_tokens: int | None = Field(default=None, ge=1)
+    # Provider-neutral request. Adapters translate it only when the selected
+    # model exposes a compatible reasoning control; otherwise they omit it.
+    reasoning_effort: Literal["off", "low", "medium", "high", "dynamic"] | None = None
     stop: str | list[str] | None = None
     presence_penalty: float | None = Field(default=None, ge=-2, le=2)
     frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
@@ -105,6 +108,7 @@ class MockChatRequest(BaseModel):
     available_tools: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1)
+    reasoning_effort: Literal["off", "low", "medium", "high", "dynamic"] | None = None
     end_session: bool = False
 
 

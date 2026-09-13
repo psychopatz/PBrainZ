@@ -74,6 +74,7 @@ def test_horde_request_uses_only_the_gateway_supported_fields(monkeypatch) -> No
         model="aphrodite/uncensored-chat",
         messages=[{"role": "user", "content": "Hello"}],
         max_completion_tokens=240,
+        reasoning_effort="medium",
         stop="END",
         tools=[{"type": "function", "function": {"name": "unsupported"}}],
         metadata={"internal": True},
@@ -86,6 +87,7 @@ def test_horde_request_uses_only_the_gateway_supported_fields(monkeypatch) -> No
     assert "max_completion_tokens" not in params
     assert "tools" not in params
     assert "metadata" not in params
+    assert "reasoning_effort" not in params
 
 
 def test_provider_error_preserves_the_upstream_reason() -> None:

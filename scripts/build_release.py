@@ -9,13 +9,17 @@ is not already available on PATH.
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import platform
 import re
+import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +28,7 @@ PACKAGING_ROOT = PROJECT_ROOT / "packaging"
 BUILD_ROOT = PROJECT_ROOT / "build" / "release"
 DEFAULT_OUTPUT = PROJECT_ROOT / "dist" / "release"
 PRODUCT_BINARY_NAME = "PBrainZ"
+PROCESS_CLOSE_TIMEOUT_SECONDS = 8.0
 VERSION_FILE = PROJECT_ROOT / "src" / "pbrainz" / "version.py"
 APPIMAGE_TOOL_URL = (
     "https://github.com/AppImage/appimagetool/releases/download/continuous/"
@@ -33,6 +38,8 @@ APPIMAGE_TOOL_URL = (
 
 def main() -> int:
     args = _parse_args()
+    if args.keep_running and args.restart:
+        raise SystemExit("--restart requires the default process shutdown; remove --keep-running.")
     target = _resolve_target(args.target)
     output_dir = Path(args.output_dir).expanduser().resolve()
     configured_appimagetool = (
@@ -48,6 +55,8 @@ def main() -> int:
 
     try:
         icon_assets = _prepare_icon_assets(staging)
+        if not args.keep_running:
+            _close_running_instances()
         bundle = _build_pyinstaller(target, staging, icon_assets)
         if target == "exe":
             artifact = output_dir / f"{PRODUCT_BINARY_NAME}-{version}-{_platform_tag()}.exe"
@@ -57,6 +66,8 @@ def main() -> int:
                 bundle, staging, output_dir, version, configured_appimagetool, icon_assets
             )
         print(f"Release artifact: {artifact}")
+        if args.restart:
+            _restart_artifact(artifact)
         return 0
     except BaseException:
         if previous_version is not None:
@@ -93,6 +104,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--appimagetool",
         help="Path to appimagetool; otherwise PATH or the official continuous build is used.",
+    )
+    parser.add_argument(
+        "--keep-running",
+        action="store_true",
+        help="Do not stop an existing PBrainZ process before building.",
+    )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Launch the newly built artifact after the build succeeds.",
     )
     return parser.parse_args()
 
@@ -286,6 +307,172 @@ def _ensure_release_output_is_safe(output_dir: Path) -> None:
             f"{runtime_data}. Choose a clean --output-dir or move that data "
             "directory before packaging."
         )
+
+
+def _close_running_instances(
+    *, timeout: float = PROCESS_CLOSE_TIMEOUT_SECONDS
+) -> tuple[int, ...]:
+    """Gracefully stop only exact PBrainZ executable processes.
+
+    Process matching deliberately ignores arbitrary command-line text, so a
+    build path such as ``/Projects/PBrainZ`` cannot make the builder kill
+    itself or an unrelated process.  Windows uses ``taskkill`` because it can
+    close the executable tree; POSIX sends TERM first and KILL only after the
+    bounded grace period.
+    """
+    pids = tuple(_running_pbrainz_pids())
+    if not pids:
+        return ()
+    print(f"Stopping existing PBrainZ process(es): {', '.join(map(str, pids))}")
+    if os.name == "nt":
+        for pid in pids:
+            _taskkill(pid, force=False)
+    else:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except PermissionError as error:
+                raise SystemExit(f"Could not stop PBrainZ process {pid}: {error}") from error
+
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        remaining = set(_running_pbrainz_pids()).intersection(pids)
+        if not remaining:
+            print("Existing PBrainZ process(es) stopped.")
+            return pids
+        time.sleep(0.1)
+
+    remaining = tuple(sorted(set(_running_pbrainz_pids()).intersection(pids)))
+    if remaining:
+        print(f"Forcing remaining PBrainZ process(es): {', '.join(map(str, remaining))}")
+        if os.name == "nt":
+            for pid in remaining:
+                _taskkill(pid, force=True)
+        else:
+            for pid in remaining:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+                except PermissionError as error:
+                    raise SystemExit(
+                        f"Could not force-stop PBrainZ process {pid}: {error}"
+                    ) from error
+        final_remaining = tuple(sorted(set(_running_pbrainz_pids()).intersection(pids)))
+        if final_remaining:
+            raise SystemExit(
+                "PBrainZ process(es) did not exit: "
+                + ", ".join(map(str, final_remaining))
+            )
+    print("Existing PBrainZ process(es) stopped.")
+    return pids
+
+
+def _running_pbrainz_pids() -> list[int]:
+    """Return PBrainZ PIDs without broad name or command-line matching."""
+    if os.name == "nt":
+        return _windows_pbrainz_pids()
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,comm=,args="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"Could not inspect running processes: {error}") from error
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) < 2:
+            continue
+        try:
+            pid = int(fields[0])
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        comm = fields[1]
+        args = fields[2] if len(fields) == 3 else ""
+        if _is_pbrainz_process(comm, args):
+            pids.append(pid)
+    return pids
+
+
+def _windows_pbrainz_pids() -> list[int]:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"Could not inspect running processes: {error}") from error
+    pids: list[int] = []
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) < 2 or not _is_pbrainz_process_name(row[0]):
+            continue
+        try:
+            pids.append(int(row[1]))
+        except ValueError:
+            continue
+    return pids
+
+
+def _is_pbrainz_process(comm: str, args: str) -> bool:
+    """Match a PBrainZ binary/AppImage, without matching project paths."""
+    if _is_pbrainz_process_name(comm):
+        return True
+    try:
+        tokens = shlex.split(args, posix=os.name != "nt")
+    except ValueError:
+        tokens = args.split()
+    if not tokens:
+        return False
+    if _is_pbrainz_process_name(Path(tokens[0]).name):
+        return True
+    return "-m" in tokens and any(
+        token.casefold() == PRODUCT_BINARY_NAME.casefold() for token in tokens[1:]
+    )
+
+
+def _is_pbrainz_process_name(value: str) -> bool:
+    name = Path(str(value).strip().strip('"')).name.casefold()
+    product = PRODUCT_BINARY_NAME.casefold()
+    return name in {product, f"{product}.exe"} or (
+        name.startswith(f"{product}-") and name.endswith((".appimage", ".exe"))
+    )
+
+
+def _taskkill(pid: int, *, force: bool) -> None:
+    command = ["taskkill", "/PID", str(pid), "/T"]
+    if force:
+        command.append("/F")
+    subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _restart_artifact(artifact: Path) -> None:
+    """Start a successful artifact detached from the release builder."""
+    if not artifact.is_file():
+        raise SystemExit(f"Cannot restart missing release artifact: {artifact}")
+    popen_kwargs: dict[str, object] = {
+        "cwd": artifact.parent,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen([str(artifact)], **popen_kwargs)
+    print(f"Restarted PBrainZ from {artifact} (pid={process.pid}).")
 
 
 def _build_appimage(

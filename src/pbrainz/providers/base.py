@@ -15,6 +15,7 @@ class TokenUsage:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    thinking_tokens: int | None = None
 
     def as_dict(self) -> dict[str, int] | None:
         values = {
@@ -23,6 +24,7 @@ class TokenUsage:
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
                 "total_tokens": self.total_tokens,
+                "thinking_tokens": self.thinking_tokens,
             }.items()
             if value is not None
         }

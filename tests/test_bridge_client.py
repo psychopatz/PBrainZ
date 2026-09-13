@@ -372,6 +372,28 @@ def test_provider_text_action_uses_the_same_canonical_tool_shape() -> None:
     assert calls[0]["arguments"] == {"kind": "insult"}
 
 
+def test_provider_text_action_requires_a_tool_selected_for_this_request() -> None:
+    request = {
+        "request_id": "request-unselected-action",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "available_tools": [
+                {"type": "function", "function": {"name": "ask_name"}},
+            ],
+            "provider_tool_names": [],
+        },
+    }
+
+    text, calls = extract_text_tool_calls(
+        'I am here. <projecthoomans-action>{"name":"ask_name",'
+        '"arguments":{}}</projecthoomans-action>',
+        request,
+    )
+
+    assert text == "I am here."
+    assert calls == []
+
+
 def test_truncated_provider_action_is_removed_from_npc_dialogue() -> None:
     request = {
         "request_id": "request-truncated-action",
@@ -709,7 +731,7 @@ async def test_plain_name_turn_enters_the_authoritative_identity_pipeline(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_name_tool_only_turn_delivers_repaired_dialogue_and_tool(tmp_path) -> None:
+async def test_name_tool_only_turn_gets_dialogue_repair_and_tool(tmp_path) -> None:
     from pbrainz.bridge import BridgeState
     from pbrainz.conversation_service import ConversationService
 
@@ -758,6 +780,7 @@ async def test_name_tool_only_turn_delivers_repaired_dialogue_and_tool(tmp_path)
     assert delivery["response_text"] == "Of course. Let me introduce myself."
     assert delivery["presentation_reason"] == "llm_tool_response_repair"
     assert delivery["semantic_tool_calls"][0]["name"] == "ask_name"
+    assert len(providers.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -880,7 +903,7 @@ async def test_delivery_preserves_long_response_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_error_still_delivers_bounded_insult_reaction(tmp_path) -> None:
+async def test_provider_error_defers_semantic_reaction_reply_to_game(tmp_path) -> None:
     from pbrainz.bridge import BridgeState
     from pbrainz.conversation_service import ConversationService
 
@@ -921,10 +944,56 @@ async def test_provider_error_still_delivers_bounded_insult_reaction(tmp_path) -
     delivery = client.calls[0][2]
     assert delivery["semantic_tool_calls"][0]["name"] == "social_react"
     assert delivery["semantic_tool_calls"][0]["arguments"]["kind"] == "insult"
-    assert delivery["response_text"] == "Watch your mouth."
+    assert delivery["response_text"] == ""
     assert delivery["provider_failure"] is True
     assert delivery["context_eligible"] is False
     assert delivery["error"] == "Horde request failed"
+
+
+@pytest.mark.asyncio
+async def test_provider_error_defers_authoritative_name_reply_to_game(tmp_path) -> None:
+    from pbrainz.bridge import BridgeState
+    from pbrainz.conversation_service import ConversationService
+
+    settings = Settings(
+        database_path=str(tmp_path / "settings.db"),
+        enabled_providers="horde",
+        horde_api_key="test-key",
+        bridge_required=False,
+    )
+    service = ConversationService(settings, FailedProviders())
+    client = DeliveryClient()
+    request = {
+        "request_id": "pnc-provider-error-name-1",
+        "npc_id": "npc-one",
+        "conversation_context": {
+            "world_uuid": "world-one",
+            "world_mode": "multiplayer",
+            "server_instance_id": "test-server",
+            "server_world_generation": "world-one",
+            "player_uuid": "player-one",
+            "npc_uuid": "npc-one",
+            "session_id": "session-one",
+            "message": "What is your name?",
+            "available_tools": [
+                {"type": "function", "function": {"name": "ask_name"}},
+            ],
+        },
+    }
+
+    await complete_and_deliver(
+        FailedProviders(),
+        client,
+        BridgeState(available=True, enabled=True, ready=True, runtime_id="runtime-one"),
+        request,
+        conversation_service=service,
+    )
+
+    delivery = client.calls[0][2]
+    assert delivery["semantic_tool_calls"][0]["name"] == "ask_name"
+    assert delivery["response_text"] == ""
+    assert delivery["provider_failure"] is True
+    assert delivery["context_eligible"] is False
 
 
 class FakeProviders:

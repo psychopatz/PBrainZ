@@ -69,6 +69,91 @@ _BOLD_PATTERN = re.compile(r"(\*\*|__)(?=\S)(.*?\S)\1")
 _ITALIC_PATTERN = re.compile(r"(\*|_)(?=\S)(.*?\S)\1")
 _STRIKE_PATTERN = re.compile(r"~~(?=\S)(.*?\S)~~")
 _STAGE_MARKER_PATTERN = re.compile(r"\*\s+(?=\S)(.*?)\s*\*")
+_STAGE_DIRECTION_LEADS = frozenset(
+    {
+        "blink",
+        "blinks",
+        "cough",
+        "coughs",
+        "cross",
+        "crosses",
+        "fold",
+        "folds",
+        "frown",
+        "frowns",
+        "gasp",
+        "gasps",
+        "gesture",
+        "gestures",
+        "glance",
+        "glances",
+        "grin",
+        "grins",
+        "groan",
+        "groans",
+        "laugh",
+        "laughs",
+        "lean",
+        "leans",
+        "look",
+        "looks",
+        "lower",
+        "lowers",
+        "mumble",
+        "mumbles",
+        "mutters",
+        "mutter",
+        "nod",
+        "nods",
+        "pick",
+        "picks",
+        "point",
+        "points",
+        "raise",
+        "raises",
+        "rub",
+        "rubs",
+        "rubbing",
+        "scratch",
+        "scratches",
+        "shake",
+        "shakes",
+        "shrug",
+        "shrugs",
+        "sigh",
+        "sighs",
+        "smile",
+        "smiles",
+        "snort",
+        "snorts",
+        "scoff",
+        "scoffs",
+        "stare",
+        "stares",
+        "step",
+        "steps",
+        "turn",
+        "turns",
+        "walk",
+        "walks",
+        "wave",
+        "waves",
+        "whisper",
+        "whispers",
+        "wince",
+        "winces",
+        "wink",
+        "winks",
+        "yawn",
+        "yawns",
+    }
+)
+_PAREN_STAGE_DIRECTION_PATTERN = re.compile(
+    r"\(\s*\*(?P<cue>[^*\n]{1,180})\*\s*\)"
+)
+_STAGE_DIRECTION_PATTERN = re.compile(
+    r"(?<!\w)\*(?P<cue>[^*\n]{1,180})\*(?!\w)"
+)
 _HEADING_PATTERN = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
 _QUOTE_PATTERN = re.compile(r"(?m)^\s{0,3}>\s?")
 _DASH_LIST_PATTERN = re.compile(r"(?m)^\s{0,3}[-+]\s+")
@@ -92,16 +177,34 @@ def _replace_nonverbal_cues(value: str) -> str:
     return _CUE_PATTERN.sub(replacement, value)
 
 
+def _is_stage_direction(cue: str) -> bool:
+    normalized = " ".join(cue.casefold().split())
+    return (
+        bool(normalized)
+        and ":" not in normalized
+        and normalized.split(" ", 1)[0] in _STAGE_DIRECTION_LEADS
+    )
+
+
+def _remove_stage_directions(value: str) -> str:
+    def replacement(match: re.Match[str]) -> str:
+        return " " if _is_stage_direction(match.group("cue")) else match.group(0)
+
+    value = _PAREN_STAGE_DIRECTION_PATTERN.sub(replacement, value)
+    return _STAGE_DIRECTION_PATTERN.sub(replacement, value)
+
+
 def normalize_tts_text(text: object, *, max_chars: int = MAX_TTS_TEXT) -> str:
     """Turn generated presentation text into natural, bounded speech text.
 
     Known nonverbal cues are replaced with short pronounceable equivalents.
-    Unknown italicized content is retained as words, so this function never
-    silently drops arbitrary dialogue just because it is surrounded by stars.
+    Recognized action directions are removed, while ordinary italicized words
+    are retained as dialogue.
     """
 
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     value = _replace_nonverbal_cues(value)
+    value = _remove_stage_directions(value)
     value = _FENCED_CODE_PATTERN.sub(r"\1", value)
     value = _HTML_TAG_PATTERN.sub("", value)
     value = _IMAGE_PATTERN.sub(r"\1", value)

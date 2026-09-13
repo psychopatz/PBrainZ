@@ -47,7 +47,7 @@ def test_context_does_not_send_unrelated_tool_schemas_or_duplicate_descriptions(
     assert "Request the companion follow" not in prompt
 
 
-def test_context_sends_relevant_tool_schema_with_only_compact_name_in_prompt() -> None:
+def test_context_sends_relevant_tool_schema_without_prompt_duplication() -> None:
     result = ContextBuilder().build(
         ContextInput(
             npc_name="Alice",
@@ -62,5 +62,6 @@ def test_context_sends_relevant_tool_schema_with_only_compact_name_in_prompt() -
 
     assert [tool["function"]["name"] for tool in result.tools] == ["order_follow"]
     prompt = "\n".join(message.content or "" for message in result.messages)
-    assert "- order_follow" in prompt
+    assert "Tool Response Contract" in prompt
+    assert "- order_follow" not in prompt
     assert "Request the companion follow" not in prompt

@@ -198,7 +198,24 @@ def extract_text_tool_calls(
     request: dict[str, Any],
 ) -> tuple[str, list[dict[str, Any]]]:
     """Extract bounded action envelopes from a provider's plain-text reply."""
-    exposed = exposed_tool_names(request)
+    context = request.get("conversation_context") or request.get("context") or request
+    provider_tool_names = (
+        context.get("provider_tool_names")
+        if isinstance(context, dict)
+        else None
+    )
+    if isinstance(provider_tool_names, list):
+        # A text envelope is authorized by the tools actually sent to this
+        # provider request, not merely by the larger set the game exposes.
+        # This prevents a model from replaying an earlier action on a dialogue
+        # turn where no tool was selected.
+        exposed = {
+            str(name).strip()
+            for name in provider_tool_names
+            if str(name).strip()
+        }
+    else:
+        exposed = exposed_tool_names(request)
     calls: list[dict[str, Any]] = []
     matches = list(_ACTION_TAG_RE.finditer(str(response or "")))[:8]
     for index, match in enumerate(matches, start=1):

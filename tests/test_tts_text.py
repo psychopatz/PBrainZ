@@ -31,7 +31,8 @@ class RecordingScheduler:
         ("That was close. * gasp*", "That was close. Huh!"),
         ("She [waves](https://example.invalid) at me.", "She waves at me."),
         ("I *really* mean it.", "I really mean it."),
-        ("*waves* Hello.", "waves Hello."),
+        ("*waves* Hello.", "Hello."),
+        ("*Rubbing stomach* Positive.", "Positive."),
     ],
 )
 def test_normalize_tts_text_preserves_dialogue_and_replaces_known_cues(
@@ -44,6 +45,10 @@ def test_normalize_tts_text_handles_nested_cue_delimiters() -> None:
     assert normalize_tts_text("(*chuckle*) Well, that worked.") == (
         "Ha ha! Well, that worked."
     )
+
+
+def test_normalize_tts_text_removes_parenthesized_stage_directions() -> None:
+    assert normalize_tts_text("(*shrugs*) I don't know.") == "I don't know."
 
 
 def test_normalize_tts_text_does_not_speak_markdown_fence_or_list_syntax() -> None:
