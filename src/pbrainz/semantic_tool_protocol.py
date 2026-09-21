@@ -17,15 +17,15 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 _ACTION_TAG_RE = re.compile(
-    r"<projecthoomans-action>\s*(?P<body>\{.*?\})\s*</projecthoomans-action>",
+    r"<pbrainz-action>\s*(?P<body>\{.*?\})\s*</pbrainz-action>",
     re.IGNORECASE | re.DOTALL,
 )
 _ORPHAN_ACTION_TAG_RE = re.compile(
-    r"<projecthoomans-action\b[^>]*>.*$",
+    r"<pbrainz-action\b[^>]*>.*$",
     re.IGNORECASE | re.DOTALL,
 )
 _ACTION_CLOSE_TAG_RE = re.compile(
-    r"</projecthoomans-action\s*>",
+    r"</pbrainz-action\s*>",
     re.IGNORECASE,
 )
 _PROVIDER_SCAFFOLD_LINE_RE = re.compile(
@@ -188,8 +188,8 @@ def exposed_tool_names(request: dict[str, Any]) -> set[str]:
         if isinstance(function, dict) and function.get("name"):
             names.add(str(function["name"]).strip())
     for tool_id in context.get("available_tool_ids") or []:
-        if isinstance(tool_id, str) and tool_id.startswith("projecthoomans.llm:"):
-            names.add(tool_id[len("projecthoomans.llm:") :].strip())
+        if isinstance(tool_id, str) and tool_id.startswith("pbrainz.llm:"):
+            names.add(tool_id[len("pbrainz.llm:") :].strip())
     return {name for name in names if name}
 
 

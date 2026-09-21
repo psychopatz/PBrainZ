@@ -140,8 +140,8 @@ class UnselectedTextActionProviders:
     async def complete(self, provider, request):
         return CompletionResult(
             request.model,
-            'I live nearby. <projecthoomans-action>{"name":"ask_name",'
-            '"arguments":{}}</projecthoomans-action>',
+            'I live nearby. <pbrainz-action>{"name":"ask_name",'
+            '"arguments":{}}</pbrainz-action>',
         )
 
 

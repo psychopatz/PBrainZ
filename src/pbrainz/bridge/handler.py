@@ -747,7 +747,7 @@ def semantic_tool_calls_for(
     for tool_id in tool_ids:
         if not isinstance(tool_id, str):
             continue
-        prefix = "projecthoomans.llm:"
+        prefix = "pbrainz.llm:"
         if tool_id.startswith(prefix):
             name = tool_id[len(prefix) :].strip()
             if name:

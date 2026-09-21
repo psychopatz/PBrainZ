@@ -65,7 +65,7 @@ def test_bridge_cycle_failure_reporter_distinguishes_runtime_or_error_changes() 
 def test_file_transport_matches_psychopatzcore_slot_protocol(tmp_path) -> None:
     transport = FileBridgeTransport(tmp_path)
     request = BridgeRequest.create(
-        "projecthoomans.llm",
+        "pbrainz.llm",
         "pollChat",
         {},
         "runtime-123",
@@ -108,7 +108,7 @@ def test_file_transport_matches_psychopatzcore_slot_protocol(tmp_path) -> None:
 def test_file_transport_does_not_overwrite_busy_slots(tmp_path) -> None:
     transport = FileBridgeTransport(tmp_path)
     requests = [
-        BridgeRequest.create("projecthoomans.llm", "pollChat", {}, "runtime-123")
+        BridgeRequest.create("pbrainz.llm", "pollChat", {}, "runtime-123")
         for _ in range(16)
     ]
     slots = [transport.write_request(request) for request in requests]
@@ -117,7 +117,7 @@ def test_file_transport_does_not_overwrite_busy_slots(tmp_path) -> None:
         try:
             transport.write_request(
                 BridgeRequest.create(
-                    "projecthoomans.llm",
+                    "pbrainz.llm",
                     "pollChat",
                     {},
                     "runtime-123",
@@ -135,10 +135,10 @@ def test_file_transport_does_not_overwrite_busy_slots(tmp_path) -> None:
 def test_file_transport_recovers_only_slots_from_previous_runtime(tmp_path) -> None:
     transport = FileBridgeTransport(tmp_path)
     stale = BridgeRequest.create(
-        "projecthoomans.llm", "pollChat", {}, "old-runtime"
+        "pbrainz.llm", "pollChat", {}, "old-runtime"
     )
     current = BridgeRequest.create(
-        "projecthoomans.llm", "pollChat", {}, "current-runtime"
+        "pbrainz.llm", "pollChat", {}, "current-runtime"
     )
     stale_slot = transport.write_request(stale)
     current_slot = transport.write_request(current)
@@ -193,7 +193,7 @@ def test_semantic_tool_calls_are_limited_to_tools_exposed_by_the_game() -> None:
 def test_catalog_tool_ids_authorize_semantic_calls_without_full_schemas() -> None:
     request = {
         "conversation_context": {
-            "available_tool_ids": ["projecthoomans.llm:social_react"],
+            "available_tool_ids": ["pbrainz.llm:social_react"],
         }
     }
     calls = [
@@ -215,7 +215,7 @@ def test_horde_style_text_turn_adds_bounded_insult_tool_call() -> None:
         "npc_id": "npc-one",
         "conversation_context": {
             "message": "You are an idiot. Shut up.",
-            "available_tool_ids": ["projecthoomans.llm:social_react"],
+            "available_tool_ids": ["pbrainz.llm:social_react"],
         },
     }
 
@@ -256,7 +256,7 @@ def test_provider_text_turn_adds_explicit_positive_social_tool_call(
         "npc_id": "npc-one",
         "conversation_context": {
             "message": message,
-            "available_tool_ids": ["projecthoomans.llm:social_react"],
+            "available_tool_ids": ["pbrainz.llm:social_react"],
         },
     }
 
@@ -302,7 +302,7 @@ def test_provider_cannot_route_an_explicit_advance_into_insult_channel() -> None
         "npc_id": "npc-one",
         "conversation_context": {
             "message": "wanna fuck babe",
-            "available_tool_ids": ["projecthoomans.llm:social_react"],
+            "available_tool_ids": ["pbrainz.llm:social_react"],
         },
     }
     calls = [{
@@ -334,7 +334,7 @@ def test_name_question_adds_authoritative_identity_tool_call() -> None:
         "npc_id": "npc-one",
         "conversation_context": {
             "message": "What's your name?",
-            "available_tool_ids": ["projecthoomans.llm:ask_name"],
+            "available_tool_ids": ["pbrainz.llm:ask_name"],
         },
     }
 
@@ -362,8 +362,8 @@ def test_provider_text_action_uses_the_same_canonical_tool_shape() -> None:
     }
 
     text, calls = extract_text_tool_calls(
-        'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
-        '"arguments":{"kind":"insult"}}</projecthoomans-action>',
+        'Watch your mouth. <pbrainz-action>{"name":"social_react",'
+        '"arguments":{"kind":"insult"}}</pbrainz-action>',
         request,
     )
 
@@ -385,8 +385,8 @@ def test_provider_text_action_requires_a_tool_selected_for_this_request() -> Non
     }
 
     text, calls = extract_text_tool_calls(
-        'I am here. <projecthoomans-action>{"name":"ask_name",'
-        '"arguments":{}}</projecthoomans-action>',
+        'I am here. <pbrainz-action>{"name":"ask_name",'
+        '"arguments":{}}</pbrainz-action>',
         request,
     )
 
@@ -407,7 +407,7 @@ def test_truncated_provider_action_is_removed_from_npc_dialogue() -> None:
     }
 
     text, calls = extract_text_tool_calls(
-        'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
+        'Watch your mouth. <pbrainz-action>{"name":"social_react",'
         '"arguments',
         request,
     )
@@ -514,8 +514,8 @@ class TextActionProviders:
     async def complete(self, _provider, request):
         return CompletionResult(
             request.model,
-            'Watch your mouth. <projecthoomans-action>{"name":"social_react",'
-            '"arguments":{"kind":"insult"}}</projecthoomans-action>',
+            'Watch your mouth. <pbrainz-action>{"name":"social_react",'
+            '"arguments":{"kind":"insult"}}</pbrainz-action>',
         )
 
 
@@ -677,7 +677,7 @@ async def test_text_action_enters_the_same_delivery_pipeline(tmp_path) -> None:
         MemoryScope(identity.world_uuid, "player-one", "npc-one"),
         8,
     )
-    assert all("<projecthoomans-action>" not in turn.content for turn in stored)
+    assert all("<pbrainz-action>" not in turn.content for turn in stored)
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from .protocol import (
     BridgeResponse,
     BridgeTimeoutError,
 )
+from .provider_presence import ProviderPresenceWriter
 from .pump import run_bridge_pump
 from .state import MAX_RUNTIME_BYTES, BridgeRuntimeMonitor, BridgeState
 from .streams import PacketStreamClient
@@ -48,6 +49,7 @@ __all__ = [
     "BridgeRuntimeMonitor",
     "BridgeState",
     "BridgeTimeoutError",
+    "ProviderPresenceWriter",
     "FileBridgeTransport",
     "PacketStreamClient",
     "VOICE_CHANNEL",

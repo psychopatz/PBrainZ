@@ -360,7 +360,7 @@ to the conversation log.
 The game-side capability is intentionally limited to `pollChat`, `deliverChat`,
 `pollConversationSync`, `ackConversationSync`, and compact
 `speechStarted`/`speechFinished`/`speechFallback` events in the
-`projecthoomans.llm` namespace. Requests are tied to the current runtime ID.
+`pbrainz.llm` namespace. Requests are tied to the current runtime ID.
 Canonical conversation messages use a bounded, retryable sync outbox, so
 closing the conversation UI does not discard a provider response. Provider
 keys remain in PBrainZ's local SQLite database and never enter the game tunnel.

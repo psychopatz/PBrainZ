@@ -1,6 +1,30 @@
 import json
 
-from pbrainz.bridge import BridgeRuntimeMonitor
+from pbrainz.bridge import BridgeRuntimeMonitor, ProviderPresenceWriter
+
+
+def test_provider_presence_writer_publishes_matching_state_and_marker(tmp_path) -> None:
+    writer = ProviderPresenceWriter(tmp_path)
+
+    writer.write(
+        runtime_id="runtime-123",
+        status="ready",
+        provider="horde",
+        model="aphrodite/test",
+        heartbeat_ms=123456,
+    )
+
+    state = json.loads(
+        (tmp_path / "state" / "provider_state.json").read_text(encoding="utf-8")
+    )
+    marker = (tmp_path / "state" / "provider_state.ready.txt").read_text(
+        encoding="utf-8"
+    )
+    assert state["schema_version"] == 1
+    assert state["runtime_id"] == "runtime-123"
+    assert state["ready"] is True
+    assert state["heartbeat_ms"] == 123456
+    assert marker == "runtime-123"
 
 
 def test_bridge_runtime_requires_matching_ready_marker(tmp_path) -> None:
@@ -17,7 +41,7 @@ def test_bridge_runtime_requires_matching_ready_marker(tmp_path) -> None:
         "tool_catalog_version": 3,
         "namespaces": {
             "psychopatzcore.bridge": {"commands": []},
-            "projecthoomans.llm": {"commands": []},
+            "pbrainz.llm": {"commands": []},
         },
     }
     (state / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
@@ -29,11 +53,11 @@ def test_bridge_runtime_requires_matching_ready_marker(tmp_path) -> None:
     assert result.runtime_id == "runtime-123"
     assert result.tool_catalog_id == "catalog-1"
     assert result.tool_catalog_version == 3
-    assert result.namespaces == ("psychopatzcore.bridge", "projecthoomans.llm")
+    assert result.namespaces == ("psychopatzcore.bridge", "pbrainz.llm")
     assert result.namespaces_known is True
 
 
-def test_bridge_runtime_can_report_when_hoomans_namespace_is_missing(tmp_path) -> None:
+def test_bridge_runtime_can_report_when_pbrainz_namespace_is_missing(tmp_path) -> None:
     state = tmp_path / "state"
     state.mkdir()
     runtime = {
@@ -50,7 +74,7 @@ def test_bridge_runtime_can_report_when_hoomans_namespace_is_missing(tmp_path) -
 
     assert result.ready is True
     assert result.namespaces_known is True
-    assert "projecthoomans.llm" not in result.namespaces
+    assert "pbrainz.llm" not in result.namespaces
 
 
 def test_bridge_runtime_rejects_stale_marker(tmp_path) -> None:

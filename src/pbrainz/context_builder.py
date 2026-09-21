@@ -43,6 +43,7 @@ class ContextInput:
     available_tools: tuple[dict[str, Any], ...] = ()
     current_message: str = ""
     retrieval_plan: RetrievalPlan | None = None
+    dialogue_facts: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +69,7 @@ class ContextBuilder:
         "social_react handles clear social intent and ask_name handles name "
         "questions. Never repeat calls or invent results. The engine enforces "
         "permissions, cooldowns, and outcomes. "
-        "Without native tools, emit one exact <projecthoomans-action> JSON line "
+        "Without native tools, emit one exact <pbrainz-action> JSON line "
         "outside dialogue."
     )
     TOOL_RESPONSE_CONTRACT = (
@@ -188,6 +189,9 @@ class ContextBuilder:
                 True,
             ),
         ]
+        dialogue_facts = self._render_facts(value.dialogue_facts)
+        if dialogue_facts:
+            sections.append(("Lua Dialogue Grounding", dialogue_facts, False))
         if profile and profile.system_prompt:
             sections.insert(1, ("Template Instructions", profile.system_prompt, False))
         relationship = self._relevant_relationship(value.relationship_snapshot)
@@ -289,6 +293,7 @@ class ContextBuilder:
             "Core NPC Rules": 0,
             "Template Instructions": 1,
             "Character Card": 2,
+            "Lua Dialogue Grounding": 3,
             "Relevant Memories": 3,
             "Relevant Conversation Recall": 4,
             "Tool Response Contract": 5,

@@ -18,6 +18,7 @@ from .client import BridgeClient
 from .handler import complete_and_deliver, preview, request_message
 from .memory_context import ActiveMemoryContextCache
 from .protocol import NAMESPACE, BridgeClientError, BridgeCommandError
+from .provider_presence import ProviderPresenceWriter
 from .state import BridgeRuntimeMonitor
 from .transport import FileBridgeTransport
 from .voice import VoicePacketConsumer, voice_channel_available
@@ -73,6 +74,21 @@ class _CycleFailureReporter:
         return suppressed
 
 
+def _provider_presence_profile(
+    settings: Settings,
+    providers: ProviderRegistry,
+) -> tuple[str | None, str | None, bool, str | None]:
+    """Resolve a diagnostic provider profile without making a network call."""
+    model = settings.default_model or "default"
+    try:
+        provider_name, resolved_model = providers.resolve(None, model)
+    except Exception:
+        return None, None, False, "provider_resolution_failed"
+    if not settings.provider_configured(provider_name):
+        return provider_name, resolved_model, False, "provider_not_configured"
+    return provider_name, resolved_model, True, None
+
+
 async def run_bridge_pump(
     settings: Settings,
     providers: ProviderRegistry,
@@ -86,6 +102,45 @@ async def run_bridge_pump(
     # The monitor and transport must use the same resolved path. This also
     # lets the controller re-point the worker after a settings change.
     transport = FileBridgeTransport(monitor.root)
+    presence = ProviderPresenceWriter(monitor.root)
+    presence_provider, presence_model, provider_ready, provider_reason = (
+        _provider_presence_profile(settings, providers)
+    )
+    next_presence_at = 0.0
+
+    def publish_presence(state) -> None:
+        nonlocal next_presence_at
+        if not state.runtime_id:
+            return
+        now = time.monotonic()
+        if now < next_presence_at:
+            return
+        status = "ready"
+        reason = None
+        if not state.ready:
+            status = "unavailable"
+            reason = "bridge_not_ready"
+        elif not provider_ready:
+            status = "unavailable"
+            reason = provider_reason or "provider_not_configured"
+        elif not state.namespaces_known:
+            status = "unavailable"
+            reason = "pbrainz_namespace_unknown"
+        elif NAMESPACE not in state.namespaces:
+            status = "unavailable"
+            reason = "pbrainz_namespace_missing"
+        try:
+            presence.write(
+                runtime_id=state.runtime_id,
+                status=status,
+                provider=presence_provider,
+                model=presence_model,
+                reason=reason,
+            )
+        except OSError:
+            LOGGER.debug("Could not publish pbrainz provider presence", exc_info=True)
+        next_presence_at = now + max(1.0, settings.bridge_poll_interval)
+
     client = BridgeClient(
         transport,
         timeout=max(2.0, min(settings.request_timeout, 30.0)),
@@ -137,6 +192,7 @@ async def run_bridge_pump(
             sync_supported = None
             if voice_consumer:
                 voice_consumer.reset()
+        publish_presence(state)
         catalog_signature = (state.runtime_id, state.tool_catalog_id)
         if (
             state.ready
@@ -164,7 +220,7 @@ async def run_bridge_pump(
         if state.namespaces_known and NAMESPACE not in state.namespaces:
             if missing_namespace_runtime != state.runtime_id:
                 LOGGER.warning(
-                    "Project Hoomans LLM bridge namespace is not registered; "
+                    "PBrainZ bridge namespace is not registered; "
                     "waiting for the ProjectHoomans client integration runtime=%s root=%s",
                     state.runtime_id,
                     transport.root,

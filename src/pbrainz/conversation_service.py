@@ -116,6 +116,8 @@ class ConversationRequest:
     reasoning_effort: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     end_session: bool = False
+    # Bounded Lua-supplied prompt context; never persisted as PBrainZ memory.
+    dialogue_facts: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ConversationRequest:
@@ -175,6 +177,7 @@ class ConversationRequest:
                 or "the player"
             ),
             character_card=_mapping(context.get("character_card") or context.get("characterCard")),
+            dialogue_facts=_dialogue_facts(context.get("dialogue_facts")),
             relationship_snapshot=_mapping(
                 context.get("relationship_snapshot")
                 or context.get("relationshipSnapshot")
@@ -612,6 +615,7 @@ class ConversationService:
                 npc_name=request.npc_name,
                 player_name=request.player_name,
                 character_card=request.character_card,
+                dialogue_facts=request.dialogue_facts,
                 relationship_snapshot=request.relationship_snapshot,
                 relationship_capabilities=request.relationship_capabilities,
                 preferences=request.preferences,
@@ -1543,6 +1547,37 @@ def _completion_trace_payload(
         "latency_ms": latency_ms,
         "context_build_ms": context_build_ms,
     }
+
+
+def _dialogue_facts(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    output: list[dict[str, Any]] = []
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "fact").strip().lower()
+        if (
+            not kind
+            or len(kind) > 48
+            or not all(character.isalnum() or character in "_.-" for character in kind)
+        ):
+            continue
+        truth_status = str(item.get("truth_status") or "unverified").strip().lower()
+        if truth_status not in {"known", "reported", "unverified"}:
+            truth_status = "unverified"
+        content = " ".join(str(item.get("content") or "").split())
+        content = "".join(character for character in content if character.isprintable())
+        content = content[:240].strip()
+        if content:
+            output.append(
+                {
+                    "kind": kind,
+                    "truth_status": truth_status,
+                    "content": content,
+                }
+            )
+    return tuple(output)
 
 
 def _participants(value: Any) -> tuple[dict[str, Any], ...]:

@@ -10,6 +10,7 @@ from pbrainz.providers.registry import ProviderRegistry
 from pbrainz.tts import TTSService
 
 from .memory_context import ActiveMemoryContextCache
+from .provider_presence import ProviderPresenceWriter
 from .pump import run_bridge_pump
 from .state import BridgeRuntimeMonitor
 
@@ -65,13 +66,22 @@ class BridgeController:
     async def stop(self) -> None:
         task = self._task
         self._task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        state = self.monitor.read()
+        if state.runtime_id:
+            try:
+                ProviderPresenceWriter(self.monitor.root).write(
+                    runtime_id=state.runtime_id,
+                    status="unavailable",
+                    reason="worker_stopped",
+                )
+            except OSError:
+                pass
 
     async def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
